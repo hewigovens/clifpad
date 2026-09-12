@@ -74,22 +74,22 @@ impl Client {
     /// API key is optional because most local servers do not want one.
     pub fn from_env(offline_flag: bool) -> Self {
         let _ = dotenvy::dotenv();
-        let base_url = first_env(&["SMART_REPL_BASE_URL", "OPENAI_BASE_URL"])
+        let base_url = first_env(&["CLIFPAD_BASE_URL", "OPENAI_BASE_URL"])
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         let model =
-            first_env(&["SMART_REPL_MODEL", "OPENAI_MODEL"]).unwrap_or_else(|| DEFAULT_MODEL.to_string());
+            first_env(&["CLIFPAD_MODEL", "OPENAI_MODEL"]).unwrap_or_else(|| DEFAULT_MODEL.to_string());
         let base_url = base_url.trim_end_matches('/').to_string();
-        // SMART_REPL_API_KEY is explicit and always sent. OPENAI_API_KEY is
+        // CLIFPAD_API_KEY is explicit and always sent. OPENAI_API_KEY is
         // scoped to OpenAI: sending it as a bearer token to a LAN server or a
         // mistyped host would leak it, so it is only used for api.openai.com.
-        let api_key = first_env(&["SMART_REPL_API_KEY"]).or_else(|| {
+        let api_key = first_env(&["CLIFPAD_API_KEY"]).or_else(|| {
             if is_openai_host(&base_url) {
                 first_env(&["OPENAI_API_KEY"])
             } else {
                 None
             }
         });
-        let env_offline = first_env(&["SMART_REPL_OFFLINE"])
+        let env_offline = first_env(&["CLIFPAD_OFFLINE"])
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
         Self {

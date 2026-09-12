@@ -466,7 +466,7 @@ impl Session {
             if !self.symbols.lock().unwrap().contains_key(&sym) {
                 bail!(
                     "unknown symbol %{sym}: declare it first (:global or :buf in the REPL, \
-                     scratch_alloc over MCP); :state / scratch_state lists what exists"
+                     clifpad_alloc over MCP); :state / clifpad_state lists what exists"
                 );
             }
             let id = match self.datas.get(&sym) {

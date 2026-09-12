@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Smoke test for the smart-repl MCP server (DESIGN.md §7).
+"""Smoke test for the clifpad MCP server (DESIGN.md §7).
 
-Spawns `target/debug/smart-repl --mcp`, speaks newline-delimited JSON-RPC 2.0
+Spawns `target/debug/clifpad --mcp`, speaks newline-delimited JSON-RPC 2.0
 over its stdin/stdout, and checks the five scratch_* tools plus the protocol
 handshake. Prints an abbreviated transcript; exits non-zero on the first
 failure.
 
-    python3 scripts/mcp_smoke.py [path/to/smart-repl]
+    python3 scripts/mcp_smoke.py [path/to/clifpad]
 
-Requires a CLI that dispatches `--mcp` to smart_repl::mcp::serve.
+Requires a CLI that dispatches `--mcp` to clifpad::mcp::serve.
 """
 
 import json
@@ -17,7 +17,7 @@ import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "target", "debug", "smart-repl")
+BIN = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "target", "debug", "clifpad")
 
 SUM_XS = """function %main() -> f64 {
     gv0 = symbol %xs
@@ -163,7 +163,7 @@ def main():
         "clientInfo": {"name": "mcp_smoke", "version": "0"},
     })
     check("initialize echoes the protocol version", r["result"]["protocolVersion"] == "2024-11-05")
-    check("serverInfo.name is smart-repl", r["result"]["serverInfo"]["name"] == "smart-repl")
+    check("serverInfo.name is clifpad", r["result"]["serverInfo"]["name"] == "clifpad")
     check("advertises tools capability", "tools" in r["result"]["capabilities"])
 
     s.send("notifications/initialized", notify=True)
@@ -172,19 +172,19 @@ def main():
     names = [t["name"] for t in r["result"]["tools"]]
     print(f"    tools: {names}")
     check("five scratch_* tools", names == [
-        "scratch_eval", "scratch_bench", "scratch_alloc", "scratch_state", "scratch_reset",
+        "clifpad_eval", "clifpad_bench", "clifpad_alloc", "clifpad_state", "clifpad_reset",
     ], str(names))
     desc = r["result"]["tools"][0]["description"]
-    check("scratch_eval description carries the cheat sheet", "iadd_imm" in desc and "block0" in desc)
+    check("clifpad_eval description carries the cheat sheet", "iadd_imm" in desc and "block0" in desc)
     check("every tool has an object inputSchema",
           all(t["inputSchema"]["type"] == "object" for t in r["result"]["tools"]))
 
-    r = s.call("scratch_alloc", {"name": "xs", "type": "f64", "values": [1, 2, 3]})
+    r = s.call("clifpad_alloc", {"name": "xs", "type": "f64", "values": [1, 2, 3]})
     check("alloc succeeds", r["result"]["isError"] is False)
     check("alloc reports name, type, length, address",
           "%xs" in text_of(r) and "f64[3]" in text_of(r) and "addr " in text_of(r), text_of(r))
 
-    r = s.call("scratch_eval", {"code": SUM_XS, "want": ["clif", "asm"]})
+    r = s.call("clifpad_eval", {"code": SUM_XS, "want": ["clif", "asm"]})
     body = text_of(r)
     check("sum over %xs runs", r["result"]["isError"] is False, body)
     check("value is 6.0", body.startswith("value: 6.0"), body.splitlines()[0] if body else "")
@@ -192,24 +192,24 @@ def main():
     check("clif section present", "--- clif ---" in body)
     check("asm section present", "--- asm ---" in body)
 
-    r = s.call("scratch_eval", {"code": BROKEN})
+    r = s.call("clifpad_eval", {"code": BROKEN})
     check("broken program is isError", r["result"]["isError"] is True)
     check("verifier message passed through",
           "block1" in text_of(r) and "verifier" in text_of(r).lower(), text_of(r))
 
-    r = s.call("scratch_bench", {"code": SUM_TO_N, "iterations": 200})
+    r = s.call("clifpad_bench", {"code": SUM_TO_N, "iterations": 200})
     body = text_of(r)
     check("bench succeeds", r["result"]["isError"] is False, body)
     check("bench reports min/median/max", "min: " in body and "median: " in body and "max: " in body)
     check("bench value is 499500", "value: 499500" in body, body)
 
-    r = s.call("scratch_state")
+    r = s.call("clifpad_state")
     check("state lists %xs", "%xs" in text_of(r), text_of(r))
 
-    r = s.call("scratch_reset")
+    r = s.call("clifpad_reset")
     check("reset returns ok", text_of(r).strip() == "ok", text_of(r))
 
-    r = s.call("scratch_state")
+    r = s.call("clifpad_state")
     check("state is empty after reset", text_of(r).strip() == "(empty session)", text_of(r))
 
     r = s.send("ping")

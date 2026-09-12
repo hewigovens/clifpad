@@ -35,7 +35,7 @@ pub fn serve(allow_unsafe: bool) -> Result<()> {
         );
     }
     let mut session = Session::new(allow_unsafe)?;
-    eprintln!("smart-repl MCP server on stdio (allow_unsafe={allow_unsafe})");
+    eprintln!("clifpad MCP server on stdio (allow_unsafe={allow_unsafe})");
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
@@ -119,7 +119,7 @@ fn initialize_result(params: &Value) -> Value {
     json!({
         "protocolVersion": version,
         "capabilities": { "tools": {} },
-        "serverInfo": { "name": "smart-repl", "version": env!("CARGO_PKG_VERSION") },
+        "serverInfo": { "name": "clifpad", "version": env!("CARGO_PKG_VERSION") },
     })
 }
 
@@ -180,11 +180,11 @@ fn run_tool(session: &mut Session, params: &Value) -> Result<String, Fail> {
         Some(_) => return Err(Fail::invalid_params("\"arguments\" must be an object")),
     };
     match name {
-        "scratch_eval" => tool_eval(session, args),
-        "scratch_bench" => tool_bench(session, args),
-        "scratch_alloc" => tool_alloc(session, args),
-        "scratch_state" => Ok(session.state().to_string()),
-        "scratch_reset" => {
+        "clifpad_eval" => tool_eval(session, args),
+        "clifpad_bench" => tool_bench(session, args),
+        "clifpad_alloc" => tool_alloc(session, args),
+        "clifpad_state" => Ok(session.state().to_string()),
+        "clifpad_reset" => {
             session.reset().map_err(session_error)?;
             Ok("ok".to_string())
         }
@@ -490,7 +490,7 @@ fn strip_fences(code: &str) -> String {
 fn tools(allow_unsafe: bool) -> Value {
     json!([
         {
-            "name": "scratch_eval",
+            "name": "clifpad_eval",
             "description": eval_description(allow_unsafe),
             "inputSchema": {
                 "type": "object",
@@ -513,10 +513,10 @@ fn tools(allow_unsafe: bool) -> Value {
             },
         },
         {
-            "name": "scratch_bench",
+            "name": "clifpad_bench",
             "description": "Compile a CLIF program once and run %main many times, reporting min, \
-                            median and max wall-clock nanoseconds plus the usual scratch_eval \
-                            report for the last run. Same CLIF rules as scratch_eval (see its \
+                            median and max wall-clock nanoseconds plus the usual clifpad_eval \
+                            report for the last run. Same CLIF rules as clifpad_eval (see its \
                             description). %main is required and its side effects repeat, so keep \
                             it free of allocation if you want a clean number.",
             "inputSchema": {
@@ -533,7 +533,7 @@ fn tools(allow_unsafe: bool) -> Value {
                     "want": {
                         "type": "array",
                         "items": { "type": "string", "enum": ["clif", "asm"] },
-                        "description": "Extra sections, as in scratch_eval.",
+                        "description": "Extra sections, as in clifpad_eval.",
                     },
                 },
                 "required": ["code"],
@@ -541,7 +541,7 @@ fn tools(allow_unsafe: bool) -> Value {
             },
         },
         {
-            "name": "scratch_alloc",
+            "name": "clifpad_alloc",
             "description": "Create a named, zeroed, session-owned memory region and return its \
                             address. CLIF reaches it with `gv0 = symbol %name` and \
                             `v0 = symbol_value.i64 gv0`, which yields the ADDRESS; load from it to \
@@ -549,7 +549,7 @@ fn tools(allow_unsafe: bool) -> Value {
                             \"values\" (initialized), or give \"bytes\" for UTF-8 text, which also \
                             creates an i64 slot %<name>_len holding the byte count. A name binds \
                             once per session: the JIT caches its address, so it cannot be re-typed \
-                            or re-sized without scratch_reset.",
+                            or re-sized without clifpad_reset.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -578,7 +578,7 @@ fn tools(allow_unsafe: bool) -> Value {
             },
         },
         {
-            "name": "scratch_state",
+            "name": "clifpad_state",
             "description": "List what this session holds: persisted functions with their \
                             signatures, and globals and buffers with type, length, address and a \
                             preview of their contents. Only these names, plus the %rt_* host \
@@ -586,7 +586,7 @@ fn tools(allow_unsafe: bool) -> Value {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
         },
         {
-            "name": "scratch_reset",
+            "name": "clifpad_reset",
             "description": "Drop every persisted function, global and buffer and rebuild the JIT \
                             module. Use it when a symbol name needs a different type or length. \
                             Returns \"ok\".",
@@ -620,11 +620,11 @@ Session conventions
 - One session per server process. Every function except %main persists and can be imported by name \
 from a later call; %main is re-declared each time and is never callable. Redefining a function \
 affects later calls only — code already compiled keeps the old body.
-- Only names listed by scratch_state can be imported: the %rt_* host functions below, functions \
-defined by an earlier scratch_eval, and globals or buffers created with scratch_alloc. \
+- Only names listed by clifpad_state can be imported: the %rt_* host functions below, functions \
+defined by an earlier clifpad_eval, and globals or buffers created with clifpad_alloc. \
 {unsafe_note}
 - A global name binds once per session. The JIT caches its address the first time it resolves, so a \
-name cannot be re-typed or re-sized; scratch_reset clears everything.
+name cannot be re-typed or re-sized; clifpad_reset clears everything.
 - Nothing is sandboxed and nothing is bounds-checked. A wild address or a division by zero kills \
 this server process, and a loop that never terminates hangs it. Bound your loops and check your \
 addresses.
@@ -656,7 +656,7 @@ mod tests {
         let mut s = Session::new(false).unwrap();
         let r = call(&mut s, 1, "initialize", json!({ "protocolVersion": "2025-06-18" }));
         assert_eq!(r["result"]["protocolVersion"], "2025-06-18");
-        assert_eq!(r["result"]["serverInfo"]["name"], "smart-repl");
+        assert_eq!(r["result"]["serverInfo"]["name"], "clifpad");
         assert!(r["result"]["capabilities"]["tools"].is_object());
         let r = call(&mut s, 2, "initialize", json!({ "protocolVersion": "1999-01-01" }));
         assert_eq!(r["result"]["protocolVersion"], DEFAULT_PROTOCOL);
@@ -686,11 +686,11 @@ mod tests {
         assert_eq!(
             names,
             [
-                "scratch_eval",
-                "scratch_bench",
-                "scratch_alloc",
-                "scratch_state",
-                "scratch_reset"
+                "clifpad_eval",
+                "clifpad_bench",
+                "clifpad_alloc",
+                "clifpad_state",
+                "clifpad_reset"
             ]
         );
         let eval = tools[0]["description"].as_str().unwrap();
@@ -709,7 +709,7 @@ mod tests {
             5,
             "tools/call",
             json!({
-                "name": "scratch_alloc",
+                "name": "clifpad_alloc",
                 "arguments": { "name": "xs", "type": "f64", "values": [1.0, 2.5] },
             }),
         );
@@ -728,7 +728,7 @@ mod tests {
             &mut s,
             6,
             "tools/call",
-            json!({ "name": "scratch_eval", "arguments": { "code": code, "want": ["clif"] } }),
+            json!({ "name": "clifpad_eval", "arguments": { "code": code, "want": ["clif"] } }),
         );
         let text = tool_text(&r);
         assert_eq!(r["result"]["isError"], false);
@@ -739,13 +739,13 @@ mod tests {
             &mut s,
             7,
             "tools/call",
-            json!({ "name": "scratch_state", "arguments": {} }),
+            json!({ "name": "clifpad_state", "arguments": {} }),
         );
         assert!(tool_text(&r).contains("%xs"), "{}", tool_text(&r));
 
-        let r = call(&mut s, 8, "tools/call", json!({ "name": "scratch_reset" }));
+        let r = call(&mut s, 8, "tools/call", json!({ "name": "clifpad_reset" }));
         assert_eq!(tool_text(&r), "ok");
-        let r = call(&mut s, 9, "tools/call", json!({ "name": "scratch_state" }));
+        let r = call(&mut s, 9, "tools/call", json!({ "name": "clifpad_state" }));
         assert_eq!(tool_text(&r), "(empty session)");
     }
 
@@ -757,7 +757,7 @@ mod tests {
             &mut s,
             10,
             "tools/call",
-            json!({ "name": "scratch_eval", "arguments": { "code": broken } }),
+            json!({ "name": "clifpad_eval", "arguments": { "code": broken } }),
         );
         assert_eq!(r["result"]["isError"], true);
         assert!(tool_text(&r).contains("block1"), "{}", tool_text(&r));
@@ -767,7 +767,7 @@ mod tests {
             &mut s,
             11,
             "tools/call",
-            json!({ "name": "scratch_eval", "arguments": { "code": ok } }),
+            json!({ "name": "clifpad_eval", "arguments": { "code": ok } }),
         );
         assert_eq!(r["result"]["isError"], false);
         assert!(tool_text(&r).starts_with("value: 7\n"), "{}", tool_text(&r));
@@ -781,7 +781,7 @@ mod tests {
             &mut s,
             12,
             "tools/call",
-            json!({ "name": "scratch_bench", "arguments": { "code": code, "iterations": 50 } }),
+            json!({ "name": "clifpad_bench", "arguments": { "code": code, "iterations": 50 } }),
         );
         let text = tool_text(&r);
         assert!(text.starts_with("iterations: 50\nmin: "), "{text}");
@@ -791,7 +791,7 @@ mod tests {
             &mut s,
             13,
             "tools/call",
-            json!({ "name": "scratch_bench", "arguments": { "code": code, "iterations": 0 } }),
+            json!({ "name": "clifpad_bench", "arguments": { "code": code, "iterations": 0 } }),
         );
         assert_eq!(r["result"]["isError"], true);
     }
@@ -801,7 +801,7 @@ mod tests {
         let mut s = Session::new(false).unwrap();
         let r = call(&mut s, 14, "tools/call", json!({ "name": "nope" }));
         assert_eq!(r["error"]["code"], INVALID_PARAMS);
-        let r = call(&mut s, 15, "tools/call", json!({ "name": "scratch_eval" }));
+        let r = call(&mut s, 15, "tools/call", json!({ "name": "clifpad_eval" }));
         assert_eq!(r["error"]["code"], INVALID_PARAMS);
         let r = call(&mut s, 16, "ping", json!({}));
         assert_eq!(r["result"], json!({}));

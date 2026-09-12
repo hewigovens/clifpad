@@ -6,7 +6,7 @@
 //! removed them), decimal float literals are fine because the session rewrites
 //! them to hex before parsing.
 
-use smart_repl::{ElemType, EvalOptions, Scalar, Session};
+use clifpad::{ElemType, EvalOptions, Scalar, Session};
 
 // ---------------------------------------------------------------- helpers
 
@@ -20,7 +20,7 @@ fn session() -> Session {
 }
 
 /// Evaluate and unwrap, printing the error so a failure is diagnosable.
-fn eval_ok(s: &mut Session, text: &str) -> smart_repl::Outcome {
+fn eval_ok(s: &mut Session, text: &str) -> clifpad::Outcome {
     match s.eval(text, &plain()) {
         Ok(o) => o,
         Err(e) => panic!("expected success, got error:\n{e:#}\n--- source ---\n{text}"),
@@ -35,14 +35,14 @@ fn eval_err(s: &mut Session, text: &str) -> String {
     }
 }
 
-fn i64_value(o: &smart_repl::Outcome) -> i64 {
+fn i64_value(o: &clifpad::Outcome) -> i64 {
     match o.value {
         Some(Scalar::I64(v)) => v,
         other => panic!("expected an i64 result, got {other:?}"),
     }
 }
 
-fn f64_value(o: &smart_repl::Outcome) -> f64 {
+fn f64_value(o: &clifpad::Outcome) -> f64 {
     match o.value {
         Some(Scalar::F64(v)) => v,
         other => panic!("expected an f64 result, got {other:?}"),

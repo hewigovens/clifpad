@@ -207,7 +207,7 @@ Session-owned memory is created by command or tool, then referenced from CLIF as
 :buf name u8 "hello"         → %name is the address of the bytes, %name_len is a slot holding 5
 ```
 
-Addresses are stable for the session (each allocation is its own `Box`). Code reads and writes them with ordinary `load` and `store`. Buffer lengths are the caller's responsibility, exactly as in C. The `:state` command and `scratch_state` tool list every symbol with its type, length, and a preview of its contents.
+Addresses are stable for the session (each allocation is its own `Box`). Code reads and writes them with ordinary `load` and `store`. Buffer lengths are the caller's responsibility, exactly as in C. The `:state` command and `clifpad_state` tool list every symbol with its type, length, and a preview of its contents.
 
 A symbol name is bound once per session. `JITModule` caches the address the first time a symbol is resolved, so re-creating `%xs` at a new address would leave every later evaluation reading the old one (verified in the spike, §11). Therefore there is no `del`: a name can be re-declared only with the same type and length, which is a no-op, and memory is released only by `:reset`, which also rebuilds the `JITModule`.
 
@@ -268,11 +268,11 @@ JSON-RPC over stdio, one `Session` per process. Tools:
 
 | Tool | Input | Output |
 |---|---|---|
-| `scratch_eval` | `code`, `want: [clif, asm]` | `Outcome` as JSON, or `{error}` |
-| `scratch_bench` | `code`, `iterations` | `min_ns median_ns max_ns` plus `Outcome` of one run |
-| `scratch_alloc` | `name`, `type: i64\|f64\|u8`, `len` or `bytes` | address as decimal, for reference |
-| `scratch_state` | — | functions with signatures, symbols with types, lengths, previews |
-| `scratch_reset` | — | ok |
+| `clifpad_eval` | `code`, `want: [clif, asm]` | `Outcome` as JSON, or `{error}` |
+| `clifpad_bench` | `code`, `iterations` | `min_ns median_ns max_ns` plus `Outcome` of one run |
+| `clifpad_alloc` | `name`, `type: i64\|f64\|u8`, `len` or `bytes` | address as decimal, for reference |
+| `clifpad_state` | — | functions with signatures, symbols with types, lengths, previews |
+| `clifpad_reset` | — | ok |
 
 ```mermaid
 sequenceDiagram
@@ -281,13 +281,13 @@ sequenceDiagram
     participant M as MCP server (this crate)
     participant S as Session
 
-    A->>H: scratch_eval {code: "function %main() -> i64 ... sshr v0, v1 ...", want: [asm]}
+    A->>H: clifpad_eval {code: "function %main() -> i64 ... sshr v0, v1 ...", want: [asm]}
     H->>M: JSON-RPC tools/call
     M->>S: eval(code, {asm: true})
     S-->>M: Outcome | verifier error
     M-->>H: result JSON
     H-->>A: value, disassembly, timing
-    A->>H: scratch_eval {code: "function %main() -> i64 ... ushr v0, v1 ..."}
+    A->>H: clifpad_eval {code: "function %main() -> i64 ... ushr v0, v1 ..."}
     Note over A: compares signed vs logical shift in two round trips, no cargo
 ```
 
@@ -300,7 +300,7 @@ The tool description carries the §4 conventions and the cheat sheet from §6 so
 - **FFI.** Resolving arbitrary process symbols via `dlsym` is gated by `--allow-unsafe`. Without the flag, only `%rt_*` and session functions resolve.
 - **Hangs.** JIT code cannot be preempted safely. Same mitigation as crashes: process isolation, plus a timeout. One of 22 model-written programs in §11.1 looped forever, so this is required in every frontend, not only MCP.
 - **Crash messages.** The exit signal is diagnostic and is reported as such: `SIGILL` is a Cranelift trap (division by zero or explicit trap), `SIGSEGV` / `SIGBUS` is a bad address, a timeout is a non-terminating loop. Each gets a distinct message with the likely cause, because that message is the model's only retry signal.
-- **Resource caps.** `%rt_alloc` and `scratch_alloc` refuse a single allocation over a configurable limit (default 256 MiB) and a session total over 1 GiB.
+- **Resource caps.** `%rt_alloc` and `clifpad_alloc` refuse a single allocation over a configurable limit (default 256 MiB) and a session total over 1 GiB.
 
 ## 9. Milestones
 
@@ -310,7 +310,7 @@ Each milestone is shippable on its own and has a test that proves it.
 
 **M2 — model experiment.** Done for Qwen3.8-Flash, see §11.1: 19 of 22 tasks correct on the first try, 20 of 22 within two retries. The task set in `prompts/tasks.json` is the regression suite for the prompt; rerun it whenever the cheat sheet or the host ABI changes, and against Deepseek when available. Remaining M2 work: wire `prompts/experiment.py` to the real binary once M1 lands.
 
-**M3 — MCP server.** Done. `src/mcp.rs` serves the five tools over newline-delimited JSON-RPC; `scripts/mcp_smoke.py` exercises the handshake, every tool, the verifier error path, and clean EOF exit. The Claude Code acceptance check (answering the shift question through `scratch_eval`) is still to be run by hand: `claude mcp add scratch -- target/release/smart-repl --mcp`.
+**M3 — MCP server.** Done. `src/mcp.rs` serves the five tools over newline-delimited JSON-RPC; `scripts/mcp_smoke.py` exercises the handshake, every tool, the verifier error path, and clean EOF exit. The Claude Code acceptance check (answering the shift question through `clifpad_eval`) is still to be run by hand: `claude mcp add clifpad -- target/release/clifpad --mcp`.
 
 **M4 — NL layer in the CLI.** Done in code: `src/nl.rs` and the REPL in `src/main.rs` implement the prompt, six-message history, and the retry loop with a temperature ramp; `:save` / `:load` exist. Verified against stub servers for prompt shape, retries, exhaustion, and network failure. Not yet verified against the real local model from the CLI, because the model server was unreachable when the frontends were merged; `prompts/experiment.py` now drives the real binary and is the way to do that.
 
@@ -381,7 +381,7 @@ Conclusion: the CLIF-only design holds for this model class. A 90 percent first-
 
 ## 12. Open questions
 
-1. **Name.** `smart-repl` describes the POC, not this. Rename at M5.
+1. **Name.** Settled: `clifpad`, a pad for CLIF. Crate, binary, env prefix `CLIFPAD_`, MCP tool prefix `clifpad_`.
 2. **If M2 fails for local models.** Options, in order of preference: more examples in the prompt; a larger local model; a thin frontend covering only the constructs that failed. The last option is MiniLang returning by the back door, so it needs the M2 data to justify it.
 3. **WebAssembly text as an alternative input.** Models have seen far more WAT than CLIF, and wasmtime lowers it through Cranelift. It would replace `cranelift-reader` with wasmtime, a much larger dependency, and hide the IR the user came to see. Not pursued, noted in case M2 goes badly.
 4. **Signal handler for traps.** Converting `SIGSEGV` / `SIGILL` / `SIGFPE` into an `Outcome` error would make the CLI far more forgiving. Deferred until process isolation proves insufficient.

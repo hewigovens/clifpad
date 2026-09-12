@@ -8,15 +8,15 @@ use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
-use smart_repl::{ElemType, EvalOptions, Outcome, Session};
+use clifpad::{ElemType, EvalOptions, Outcome, Session};
 
 const USAGE: &str = "\
-smart-repl — a native scratchpad: CLIF text in, machine behaviour out.
+clifpad — a native scratchpad: CLIF text in, machine behaviour out.
 
 usage:
-  smart-repl [options]            interactive REPL
-  smart-repl --eval FILE          run FILE as REPL input, then exit
-  smart-repl --mcp                serve the MCP tools over stdio
+  clifpad [options]            interactive REPL
+  clifpad --eval FILE          run FILE as REPL input, then exit
+  clifpad --mcp                serve the MCP tools over stdio
 
 options:
   --eval FILE      run FILE non-interactively (exit 1 on the first error)
@@ -27,10 +27,10 @@ options:
   --help           show this message
 
 environment (also read from .env):
-  SMART_REPL_BASE_URL / OPENAI_BASE_URL   default http://127.0.0.1:11434/v1
-  SMART_REPL_MODEL    / OPENAI_MODEL      default qwen3
-  SMART_REPL_API_KEY  / OPENAI_API_KEY    optional
-  SMART_REPL_OFFLINE=1                    same as --offline";
+  CLIFPAD_BASE_URL / OPENAI_BASE_URL   default http://127.0.0.1:11434/v1
+  CLIFPAD_MODEL    / OPENAI_MODEL      default qwen3
+  CLIFPAD_API_KEY  / OPENAI_API_KEY    optional
+  CLIFPAD_OFFLINE=1                    same as --offline";
 
 const HELP: &str = "\
 input:
@@ -106,7 +106,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     if args.mcp {
-        return match smart_repl::mcp::serve(args.allow_unsafe) {
+        return match clifpad::mcp::serve(args.allow_unsafe) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e:#}");

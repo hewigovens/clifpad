@@ -1,4 +1,4 @@
-# smart-repl — a native scratchpad
+# clifpad — a native scratchpad
 
 Small programs written in Cranelift IR (CLIF) are JIT-compiled and run in-process in milliseconds, and every run reports what happened at the machine level: value, optimized IR, disassembly, timing. There is no compile, link, or launch step.
 
@@ -82,20 +82,20 @@ Any input line that is not a command and not CLIF is sent to an OpenAI-compatibl
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SMART_REPL_BASE_URL` or `OPENAI_BASE_URL` | `http://127.0.0.1:11434/v1` | server base URL |
-| `SMART_REPL_MODEL` or `OPENAI_MODEL` | `qwen3` | model name |
-| `SMART_REPL_API_KEY` | unset | optional bearer token, sent to whatever base URL is configured |
+| `CLIFPAD_BASE_URL` or `OPENAI_BASE_URL` | `http://127.0.0.1:11434/v1` | server base URL |
+| `CLIFPAD_MODEL` or `OPENAI_MODEL` | `qwen3` | model name |
+| `CLIFPAD_API_KEY` | unset | optional bearer token, sent to whatever base URL is configured |
 | `OPENAI_API_KEY` | unset | used only when the base URL host is `api.openai.com`, so a key in your shell is never sent to a local or mistyped server |
-| `SMART_REPL_OFFLINE` | unset | `1` disables the model |
+| `CLIFPAD_OFFLINE` | unset | `1` disables the model |
 
 A `.env` file is loaded if present. Measured against a local Qwen3.8-Flash: 19 of 22 mixed tasks correct on the first try, 1 to 3 seconds each. The task set and harness are in `prompts/`.
 
 ## MCP server
 
-`smart-repl --mcp` serves one session over stdio with the tools `scratch_eval`, `scratch_bench`, `scratch_alloc`, `scratch_state`, and `scratch_reset`. The `scratch_eval` tool description carries the full CLIF reference, so the agent needs nothing else.
+`clifpad --mcp` serves one session over stdio with the tools `clifpad_eval`, `clifpad_bench`, `clifpad_alloc`, `clifpad_state`, and `clifpad_reset`. The `clifpad_eval` tool description carries the full CLIF reference, so the agent needs nothing else.
 
 ```bash
-claude mcp add scratch -- /path/to/target/release/smart-repl --mcp
+claude mcp add clifpad -- /path/to/target/release/clifpad --mcp
 ```
 
 Each server process holds its own session. If a program crashes or hangs, only that process dies; the host's tool timeout reports it.

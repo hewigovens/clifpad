@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """M2 experiment: can a local model write valid CLIF for the scratchpad?
 
-Drives the real CLI (`smart-repl --eval FILE`), not a spike. Each attempt writes
+Drives the real CLI (`clifpad --eval FILE`), not a spike. Each attempt writes
 a session prelude (the `:buf` / `:global` commands that create the globals the
 tasks refer to) followed by the model's CLIF, and runs the file as REPL input.
 
@@ -9,9 +9,9 @@ Retries use ONLY compile/verify/runtime error feedback (never the expected value
 because in the real product nobody knows the expected value.
 
 Environment:
-    SMART_REPL_BIN       path to the CLI binary (default ../target/debug/smart-repl)
-    SMART_REPL_BASE_URL  OpenAI-compatible base URL
-    SMART_REPL_MODEL     model name
+    CLIFPAD_BIN       path to the CLI binary (default ../target/debug/clifpad)
+    CLIFPAD_BASE_URL  OpenAI-compatible base URL
+    CLIFPAD_MODEL     model name
     RUNS                 output directory under prompts/ (default "runs")
 
 Usage:
@@ -23,9 +23,9 @@ import json, os, re, subprocess, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-BASE = os.environ.get("SMART_REPL_BASE_URL", "http://192.168.50.53:11234/v1")
-MODEL = os.environ.get("SMART_REPL_MODEL", "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
-BIN = os.environ.get("SMART_REPL_BIN", os.path.join(ROOT, "target", "debug", "smart-repl"))
+BASE = os.environ.get("CLIFPAD_BASE_URL", "http://192.168.50.53:11234/v1")
+MODEL = os.environ.get("CLIFPAD_MODEL", "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
+BIN = os.environ.get("CLIFPAD_BIN", os.path.join(ROOT, "target", "debug", "clifpad"))
 OUT = os.path.join(HERE, os.environ.get("RUNS", "runs"))
 MAX_RETRIES = 2
 TIMEOUT_S = 20
@@ -105,7 +105,7 @@ def run(code):
     except subprocess.TimeoutExpired:
         return None, [], "TIMEOUT (hang)"
     except FileNotFoundError:
-        sys.exit(f"CLI binary not found at {BIN}; build it with `cargo build` or set SMART_REPL_BIN")
+        sys.exit(f"CLI binary not found at {BIN}; build it with `cargo build` or set CLIFPAD_BIN")
     if p.returncode < 0:
         return None, [], signal_message(-p.returncode)
     if p.returncode != 0:

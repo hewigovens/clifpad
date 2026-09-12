@@ -1,9 +1,9 @@
 [package]
-name = "smart-repl"
+name = "clifpad"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "AI-powered Smart REPL that JIT-compiles generated MiniLang with Cranelift"
+description = "A native scratchpad: Cranelift IR text in, JIT-compiled machine behaviour out, for developers and coding agents"
 license = "MIT"
 readme = "README.md"
 
