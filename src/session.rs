@@ -465,7 +465,8 @@ impl Session {
             let sym = ext_name(name);
             if !self.symbols.lock().unwrap().contains_key(&sym) {
                 bail!(
-                    "unknown symbol %{sym}: declare it first with :global or :buf (see :state)"
+                    "unknown symbol %{sym}: declare it first (:global or :buf in the REPL, \
+                     scratch_alloc over MCP); :state / scratch_state lists what exists"
                 );
             }
             let id = match self.datas.get(&sym) {
