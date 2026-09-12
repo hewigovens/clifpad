@@ -1,237 +1,234 @@
-//! OpenAI-compatible LLM client plus a tiny offline translator.
+//! Natural-language layer of the CLI: an OpenAI-compatible chat client that
+//! turns a request into CLIF text. See DESIGN.md §6.
+//!
+//! Binary-only module; the library, the MCP server and the harness never call
+//! a model. The retry loop lives in `main.rs` because it needs the `Session`.
 
+use std::cell::OnceCell;
 use std::env;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::lang;
-use crate::state::State;
+/// The CLIF reference the model writes against (DESIGN.md §6, §10).
+const CHEATSHEET: &str = include_str!("../prompts/cheatsheet.md");
 
-const SYSTEM_PROMPT: &str = r#"You are the code generator for a Smart REPL.
-Translate the user's request into MiniLang — a tiny, safe language that will be
-JIT-compiled with Cranelift and executed immediately.
+pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1";
+pub const DEFAULT_MODEL: &str = "qwen3";
+const TIMEOUT: Duration = Duration::from_secs(180);
+const MAX_TOKENS: u32 = 4096;
+/// Base temperature; each retry adds this much (DESIGN.md §11.1).
+pub const BASE_TEMPERATURE: f32 = 0.1;
+pub const TEMPERATURE_STEP: f32 = 0.3;
 
-Respond with MiniLang ONLY. No markdown, no commentary, no Rust types.
-
-MiniLang syntax:
-  // comments
-  let x = <expr>
-  x = <expr>
-  if <expr> { ... } else { ... }
-  while <expr> { ... }
-  return <expr>
-  fn name(a, b) { ... }
-  [1, 2, 3]
-  "strings"  true  false  null
-  operators: + - * / % == != < <= > >= && || ?? ! 
-
-Built-in functions (these talk to the persistent REPL state):
-  get("name")                 -> value or null
-  set("name", value)          -> value  (writes REPL state)
-  del("name")                 -> bool
-  keys()                      -> list of variable names
-  print(...)                  -> null   (prints to the console)
-  len(x)  push(list, v)  list(...)
-  str(x)  int(x)  float(x)  typeof(x)
-  error("message")            -> abort with an error
-
-Rules:
-  - Do NOT emit Rust types, `fn run`, `State`, `Value`, `Result`, or `Ok`.
-  - Persist data the user should remember with set()/get(), not only locals.
-  - Use `get("x") ?? 0` when incrementing a possibly missing variable.
-  - Prefer a last expression as the result (no semicolon on the final line).
-  - Keep programs short. No filesystem, network, or unsafe operations.
-  - If the user writes MiniLang already, echo it unchanged (cleaned up).
-
-Examples:
-  User: set n to 1
-  set("n", 1)
-
-  User: increment n
-  set("n", (get("n") ?? 0) + 1)
-
-  User: add 2 and 3
-  2 + 3
-
-  User: make a list of 1, 2, 3 called xs
-  set("xs", [1, 2, 3])
-
-  User: define add and compute add(10, 32)
-  fn add(a, b) { a + b }
-  add(10, 32)
-"#;
-
-#[derive(Clone, Debug)]
-pub struct LlmClient {
-    pub api_key: Option<String>,
-    pub base_url: String,
-    pub model: String,
-    pub offline: bool,
+/// One chat message. Also the unit of the CLI's conversation history.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Msg {
+    pub role: String,
+    pub content: String,
 }
 
-impl LlmClient {
-    pub fn from_env() -> Self {
-        let _ = dotenvy::dotenv();
-        let api_key = first_env(&["SMART_REPL_API_KEY", "OPENAI_API_KEY"]);
-        let base_url = first_env(&["SMART_REPL_BASE_URL", "OPENAI_BASE_URL"])
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-        let model = first_env(&["SMART_REPL_MODEL", "OPENAI_MODEL"])
-            .unwrap_or_else(|| "gpt-4o-mini".to_string());
-        let offline_flag = first_env(&["SMART_REPL_OFFLINE"])
-            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
-        let offline = offline_flag || api_key.is_none();
+impl Msg {
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::new("system", content)
+    }
+
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::new("user", content)
+    }
+
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::new("assistant", content)
+    }
+
+    fn new(role: &str, content: impl Into<String>) -> Self {
         Self {
-            api_key,
+            role: role.to_string(),
+            content: content.into(),
+        }
+    }
+}
+
+/// An OpenAI-compatible endpoint, configured from the environment.
+pub struct Client {
+    pub base_url: String,
+    pub model: String,
+    api_key: Option<String>,
+    enabled: bool,
+    http: OnceCell<reqwest::blocking::Client>,
+}
+
+impl Client {
+    /// Reads `.env` and the environment. `offline_flag` is `--offline`; the
+    /// API key is optional because most local servers do not want one.
+    pub fn from_env(offline_flag: bool) -> Self {
+        let _ = dotenvy::dotenv();
+        let base_url = first_env(&["SMART_REPL_BASE_URL", "OPENAI_BASE_URL"])
+            .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
+        let model =
+            first_env(&["SMART_REPL_MODEL", "OPENAI_MODEL"]).unwrap_or_else(|| DEFAULT_MODEL.to_string());
+        let api_key = first_env(&["SMART_REPL_API_KEY", "OPENAI_API_KEY"]);
+        let env_offline = first_env(&["SMART_REPL_OFFLINE"])
+            .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             model,
-            offline,
+            api_key,
+            enabled: !offline_flag && !env_offline,
+            http: OnceCell::new(),
         }
     }
 
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn set_enabled(&mut self, on: bool) {
+        self.enabled = on;
+    }
+
+    /// One line for the banner and for `:online` / `:offline`.
     pub fn describe(&self) -> String {
-        if self.offline {
-            format!(
-                "offline translator (no LLM)  [set OPENAI_API_KEY to enable {}]",
-                self.model
-            )
+        if self.enabled {
+            format!("{} @ {}", self.model, self.base_url)
         } else {
-            format!("{}  @ {}", self.model, self.base_url)
+            format!("offline (model disabled; {} @ {})", self.model, self.base_url)
         }
     }
 
-    pub fn generate(
-        &self,
-        user: &str,
-        state: &State,
-        last_error: Option<&str>,
-    ) -> Result<Generated> {
-        if self.offline {
-            let code = offline_generate(user).ok_or_else(|| {
-                anyhow!(
-                    "offline translator did not understand {user:?}. \
-                         Write MiniLang directly (e.g. set(\"n\", 1)) or set OPENAI_API_KEY."
-                )
-            })?;
-            return Ok(Generated {
-                code,
-                source: CodeSource::Offline,
-                raw: None,
-            });
-        }
-        let raw = self.chat(user, state, last_error)?;
-        let code = lang::extract_code(&raw);
-        Ok(Generated {
-            code,
-            source: CodeSource::Llm,
-            raw: Some(raw),
-        })
+    /// System prompt: the cheat sheet plus the session's current symbols.
+    pub fn system_prompt(&self, state: &str) -> String {
+        let state = state.trim();
+        let state = if state.is_empty() { "(empty session)" } else { state };
+        format!("{CHEATSHEET}\n\n## Session state\n\n{state}\n")
     }
 
-    fn chat(&self, user: &str, state: &State, last_error: Option<&str>) -> Result<String> {
-        let key = self
-            .api_key
-            .as_deref()
-            .ok_or_else(|| anyhow!("missing API key"))?;
-        let mut user_content = format!(
-            "Current REPL state:\n{}\nUser request:\n{user}",
-            state.summary()
-        );
-        if let Some(err) = last_error {
-            user_content.push_str(
-                "\n\nThe previous MiniLang failed with this error. \
-                 Emit a corrected MiniLang program only:\n",
-            );
-            user_content.push_str(err);
+    /// POST `/chat/completions` and return the assistant's raw content.
+    pub fn chat(&self, messages: &[Msg], temperature: f32) -> Result<String> {
+        if !self.enabled {
+            bail!("the model is disabled; use :online or drop --offline");
         }
-
         let req = ChatRequest {
-            model: self.model.clone(),
-            temperature: 0.1,
-            messages: vec![
-                ChatMessage {
-                    role: "system".into(),
-                    content: SYSTEM_PROMPT.into(),
-                },
-                ChatMessage {
-                    role: "user".into(),
-                    content: user_content,
-                },
-            ],
+            model: &self.model,
+            temperature,
+            max_tokens: MAX_TOKENS,
+            messages,
         };
-
         let url = format!("{}/chat/completions", self.base_url);
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            .build()
-            .context("build HTTP client")?;
-        let response = client
-            .post(&url)
-            .bearer_auth(key)
-            .json(&req)
-            .send()
-            .with_context(|| format!("POST {url}"))?;
+        let mut request = self.http()?.post(&url).json(&req);
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().with_context(|| format!("POST {url}"))?;
         let status = response.status();
         let body = response.text().unwrap_or_default();
         if !status.is_success() {
-            bail_http(status.as_u16(), &body)?;
+            bail!("model HTTP {}: {}", status.as_u16(), truncate(&body, 800));
         }
-        let parsed: ChatResponse =
-            serde_json::from_str(&body).with_context(|| format!("decode LLM response: {body}"))?;
+        let parsed: ChatResponse = serde_json::from_str(&body)
+            .with_context(|| format!("decode model response: {}", truncate(&body, 800)))?;
         let content = parsed
             .choices
             .into_iter()
             .find_map(|c| c.message.content)
-            .ok_or_else(|| anyhow!("LLM returned no content"))?;
+            .ok_or_else(|| anyhow!("model returned no content"))?;
+        if content.trim().is_empty() {
+            bail!("model returned an empty reply");
+        }
         Ok(content)
     }
-}
 
-fn bail_http(status: u16, body: &str) -> Result<()> {
-    Err(anyhow!("LLM HTTP {status}: {}", truncate(body, 800)))
-}
-
-fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..n])
+    fn http(&self) -> Result<&reqwest::blocking::Client> {
+        if let Some(c) = self.http.get() {
+            return Ok(c);
+        }
+        let client = reqwest::blocking::Client::builder()
+            .timeout(TIMEOUT)
+            .build()
+            .context("build HTTP client")?;
+        let _ = self.http.set(client);
+        Ok(self.http.get().expect("just set"))
     }
+}
+
+/// Pull CLIF out of a reply: drop reasoning, prefer the first fenced block,
+/// otherwise take everything from the first `function` onward.
+pub fn extract_clif(reply: &str) -> String {
+    let text = strip_think(reply);
+    if let Some(block) = fenced_block(&text) {
+        return block.trim().to_string();
+    }
+    match text.find("function") {
+        Some(i) => text[i..].trim().to_string(),
+        None => text.trim().to_string(),
+    }
+}
+
+/// The retry message fed back to the model after a parse/verifier/run error.
+pub fn retry_message(error: &str) -> Msg {
+    Msg::user(format!(
+        "The scratchpad rejected that. Error:\n{}\n\nReply with corrected CLIF only.",
+        truncate(error, 2000)
+    ))
+}
+
+pub fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        return s.to_string();
+    }
+    let mut cut = n;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &s[..cut])
+}
+
+fn strip_think(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find("<think>") {
+        out.push_str(&rest[..i]);
+        match rest[i..].find("</think>") {
+            Some(j) => rest = &rest[i + j + "</think>".len()..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    // Some servers emit the closing tag only.
+    if let Some(k) = out.rfind("</think>") {
+        out = out[k + "</think>".len()..].to_string();
+    }
+    out
+}
+
+/// Body of the first ```…``` block, if there is one.
+fn fenced_block(s: &str) -> Option<&str> {
+    let start = s.find("```")?;
+    let after = &s[start + 3..];
+    let nl = after.find('\n')?;
+    let body = &after[nl + 1..];
+    let end = body.find("```").unwrap_or(body.len());
+    Some(&body[..end])
 }
 
 fn first_env(keys: &[&str]) -> Option<String> {
     keys.iter()
         .find_map(|k| env::var(k).ok())
+        .map(|v| v.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
-#[derive(Debug, Clone)]
-pub struct Generated {
-    pub code: String,
-    pub source: CodeSource,
-    pub raw: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CodeSource {
-    Llm,
-    Offline,
-    Direct,
-}
-
 #[derive(Serialize)]
-struct ChatRequest {
-    model: String,
+struct ChatRequest<'a> {
+    model: &'a str,
     temperature: f32,
-    messages: Vec<ChatMessage>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct ChatMessage {
-    role: String,
-    content: String,
+    max_tokens: u32,
+    messages: &'a [Msg],
 }
 
 #[derive(Deserialize)]
@@ -249,135 +246,34 @@ struct ChoiceMessage {
     content: Option<String>,
 }
 
-/// Tiny pattern-based fallback so the prototype works without an API key.
-pub fn offline_generate(input: &str) -> Option<String> {
-    let raw = input.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let lower = raw.to_ascii_lowercase();
-
-    if let Some(rest) = strip_ci(&lower, raw, "set ") {
-        // set NAME to VALUE
-        if let Some((name, value)) = split_ci(rest, " to ") {
-            let name = ident(name)?;
-            let value = expr_or_quote(value.trim());
-            return Some(format!("set(\"{name}\", {value})"));
-        }
-    }
-    if let Some(name) = strip_ci(&lower, raw, "increment ") {
-        let name = ident(name)?;
-        return Some(format!("set(\"{name}\", (get(\"{name}\") ?? 0) + 1)"));
-    }
-    if let Some(name) = strip_ci(&lower, raw, "decrement ") {
-        let name = ident(name)?;
-        return Some(format!("set(\"{name}\", (get(\"{name}\") ?? 0) - 1)"));
-    }
-    if let Some(rest) = strip_ci(&lower, raw, "add ") {
-        if let Some((amount, name)) = split_ci(rest, " to ") {
-            let name = ident(name)?;
-            let amount = expr_or_quote(amount.trim());
-            return Some(format!(
-                "set(\"{name}\", (get(\"{name}\") ?? 0) + {amount})"
-            ));
-        }
-        if let Some((a, b)) = split_ci(rest, " and ") {
-            return Some(format!(
-                "{} + {}",
-                expr_or_quote(a.trim()),
-                expr_or_quote(b.trim())
-            ));
-        }
-    }
-    if let Some(name) = strip_prefix_any(raw, &["what is ", "show ", "print ", "get "]) {
-        let name = ident(name)?;
-        return Some(format!("get(\"{name}\")"));
-    }
-    if let Some(rest) = strip_ci(&lower, raw, "make a list ") {
-        // make a list NAME with 1, 2, 3
-        let rest = rest.strip_prefix("called ").unwrap_or(rest);
-        if let Some((name, items)) = split_ci(rest, " with ") {
-            let name = ident(name)?;
-            let items = items.trim();
-            return Some(format!("set(\"{name}\", [{items}])"));
-        }
-    }
-    if let Some((name, value)) = raw.split_once('=') {
-        if ident(name).is_some() && !name.contains('"') {
-            let name = ident(name)?;
-            return Some(format!("set(\"{name}\", {})", value.trim()));
-        }
-    }
-    None
-}
-
-fn strip_ci<'a>(lower: &str, raw: &'a str, prefix: &str) -> Option<&'a str> {
-    if lower.starts_with(prefix) {
-        Some(raw[prefix.len()..].trim())
-    } else {
-        None
-    }
-}
-
-fn strip_prefix_any<'a>(raw: &'a str, prefixes: &[&str]) -> Option<&'a str> {
-    let lower = raw.to_ascii_lowercase();
-    for p in prefixes {
-        if lower.starts_with(p) {
-            return Some(raw[p.len()..].trim());
-        }
-    }
-    None
-}
-
-fn split_ci<'a>(s: &'a str, sep: &str) -> Option<(&'a str, &'a str)> {
-    let lower = s.to_ascii_lowercase();
-    let sep_l = sep.to_ascii_lowercase();
-    let idx = lower.find(&sep_l)?;
-    Some((&s[..idx], &s[idx + sep.len()..]))
-}
-
-fn ident(s: &str) -> Option<String> {
-    let s = s.trim().trim_matches(|c| c == '"' || c == '\'' || c == '.');
-    if s.is_empty() {
-        return None;
-    }
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        Some(s.to_string())
-    } else {
-        None
-    }
-}
-
-fn expr_or_quote(s: &str) -> String {
-    let t = s.trim().trim_end_matches('.');
-    if t.parse::<i64>().is_ok() || t.parse::<f64>().is_ok() {
-        return t.to_string();
-    }
-    if t.starts_with('"') || t == "true" || t == "false" || t == "null" || t.starts_with('[') {
-        return t.to_string();
-    }
-    if t.chars()
-        .all(|c| c.is_ascii_digit() || "+-*/%(). ".contains(c))
-    {
-        return t.to_string();
-    }
-    format!("{t:?}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn offline_increment() {
-        assert_eq!(
-            offline_generate("increment n").unwrap(),
-            r#"set("n", (get("n") ?? 0) + 1)"#
-        );
+    fn extract_prefers_the_fenced_block() {
+        let reply = "Sure.\n```clif\nfunction %main() -> i64 {\nblock0:\n    return\n}\n```\nDone.";
+        assert!(extract_clif(reply).starts_with("function %main()"));
+        assert!(!extract_clif(reply).contains("Done."));
     }
 
     #[test]
-    fn offline_set_to() {
-        assert_eq!(offline_generate("set n to 1").unwrap(), r#"set("n", 1)"#);
+    fn extract_drops_reasoning_and_prose() {
+        let reply = "<think>I should use iconst\nfunction %nope() {}</think>\nHere:\nfunction %main() -> i64 {\nblock0:\n    v0 = iconst.i64 1\n    return v0\n}";
+        let code = extract_clif(reply);
+        assert!(code.starts_with("function %main()"), "{code}");
+        assert!(!code.contains("%nope"));
+    }
+
+    #[test]
+    fn extract_handles_a_dangling_close_tag() {
+        let reply = "thinking out loud</think>function %main() {\nblock0:\n    return\n}";
+        assert!(extract_clif(reply).starts_with("function %main()"));
+    }
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        assert_eq!(truncate("abc", 8), "abc");
+        assert_eq!(truncate("µµµµ", 3), "µ…");
     }
 }
