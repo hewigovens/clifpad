@@ -1,22 +1,55 @@
 #!/usr/bin/env python3
 """M2 experiment: can a local model write valid CLIF for the scratchpad?
 
+Drives the real CLI (`smart-repl --eval FILE`), not a spike. Each attempt writes
+a session prelude (the `:buf` / `:global` commands that create the globals the
+tasks refer to) followed by the model's CLIF, and runs the file as REPL input.
+
 Retries use ONLY compile/verify/runtime error feedback (never the expected value),
 because in the real product nobody knows the expected value.
+
+Environment:
+    SMART_REPL_BIN       path to the CLI binary (default ../target/debug/smart-repl)
+    SMART_REPL_BASE_URL  OpenAI-compatible base URL
+    SMART_REPL_MODEL     model name
+    RUNS                 output directory under prompts/ (default "runs")
+
+Usage:
+    ./experiment.py                 run every task
+    ./experiment.py const fib       run only those task ids
+    ./experiment.py --dry-run       compose a prelude and parse a fake CLI run
 """
 import json, os, re, subprocess, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-BASE = "http://192.168.50.53:11234/v1"
-MODEL = "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit"
-SPIKE = os.path.join(HERE, "spike", "target", "debug", "spike")
+ROOT = os.path.dirname(HERE)
+BASE = os.environ.get("SMART_REPL_BASE_URL", "http://192.168.50.53:11234/v1")
+MODEL = os.environ.get("SMART_REPL_MODEL", "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
+BIN = os.environ.get("SMART_REPL_BIN", os.path.join(ROOT, "target", "debug", "smart-repl"))
 OUT = os.path.join(HERE, os.environ.get("RUNS", "runs"))
 MAX_RETRIES = 2
-os.makedirs(OUT, exist_ok=True)
+TIMEOUT_S = 20
 
-cheatsheet = open(os.path.join(HERE, "cheatsheet.md")).read()
-tasks = json.load(open(os.path.join(HERE, "tasks.json")))
-only = set(sys.argv[1:])
+# The session state every task is written against. These commands go at the top
+# of each --eval file, and the "## Session state" block below describes exactly
+# the same thing to the model.
+PRELUDE = [
+    ':buf xs f64 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0',
+    ':buf hello u8 "hello world"',
+    ':global counter i64 0',
+]
+
+SESSION_STATE = """
+## Session state
+No functions are defined yet. These globals already exist and may be imported
+with `gv0 = symbol %name` (remember: `symbol_value` gives the ADDRESS, `load`
+gives the contents):
+
+    %xs        f64[8]    1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0
+    %hello     u8[11]    "hello world"
+    %hello_len i64[1]    11          ; length of %hello, as a value in memory
+    %counter   i64[1]    0
+"""
 
 
 def chat(messages, temperature=0.1):
@@ -39,56 +72,115 @@ def extract(text):
     return code[i:].strip() if i >= 0 else code.strip()
 
 
+def compose(code):
+    """The REPL input file: session prelude commands, then the model's CLIF."""
+    return "\n".join(PRELUDE) + "\n" + code.strip() + "\n"
+
+
+def parse_stdout(out):
+    """`print: <text>` lines and one `value: <v>` line; `; compile …` is stats."""
+    value, prints = None, []
+    for line in out.splitlines():
+        if line.startswith("print: "):
+            prints.append(line[7:])
+        elif line.startswith("value: "):
+            value = line[7:].strip()
+    return value, prints
+
+
+def signal_message(sig):
+    if sig == 4:
+        return "The process died with SIGILL while running your code: a Cranelift trap fired. That means integer division or remainder by zero (sdiv/udiv/srem/urem with a zero divisor), or an explicit trap instruction. Check the base case of loops and recursion so the divisor can never be 0."
+    if sig in (10, 11):
+        return f"The process died with signal {sig} (bad memory address) while running your code. A load or store hit an invalid address: check that you loaded the VALUE from a slot (load.i64) instead of using its address, and that loop bounds come from a length, not an address."
+    return f"The process died with signal {sig} while running your code."
+
+
 def run(code):
+    """Run one attempt through the CLI. Returns (value, prints, error)."""
     path = os.path.join(OUT, "cur.clif")
-    open(path, "w").write(code + "\n")
+    open(path, "w").write(compose(code))
     try:
-        p = subprocess.run([SPIKE, "--run", path], capture_output=True, text=True, timeout=20)
+        p = subprocess.run([BIN, "--eval", path], capture_output=True, text=True, timeout=TIMEOUT_S)
     except subprocess.TimeoutExpired:
-        return None, "TIMEOUT (hang)"
+        return None, [], "TIMEOUT (hang)"
+    except FileNotFoundError:
+        sys.exit(f"CLI binary not found at {BIN}; build it with `cargo build` or set SMART_REPL_BIN")
+    if p.returncode < 0:
+        return None, [], signal_message(-p.returncode)
     if p.returncode != 0:
-        sig = -p.returncode
-        if sig == 4:
-            return None, "The process died with SIGILL while running your code: a Cranelift trap fired. That means integer division or remainder by zero (sdiv/udiv/srem/urem with a zero divisor), or an explicit trap instruction. Check the base case of loops and recursion so the divisor can never be 0."
-        if sig in (10, 11):
-            return None, f"The process died with signal {sig} (bad memory address) while running your code. A load or store hit an invalid address: check that you loaded the VALUE from a slot (load.i64) instead of using its address, and that loop bounds come from a length, not an address."
-        return None, f"The process died with signal {sig} while running your code."
-    out = p.stdout
-    if out.startswith("VALUE: "):
-        return out[7:].strip(), None
-    return None, out.strip()[:1500]
+        err = (p.stderr.strip() or p.stdout.strip() or f"exit status {p.returncode}")[:1500]
+        return None, [], err
+    value, prints = parse_stdout(p.stdout)
+    if value is None:
+        # No `value:` line: the text defined functions but never ran a %main.
+        return None, prints, (p.stdout.strip() or "no %main was evaluated")[:1500]
+    return value, prints, None
 
 
-def check(value, task):
+def check(value, prints, task):
     if value is None:
         return False
-    v = value.split("  prints=")[0]
-    prints = value.split("  prints=[")[1].rstrip("]") if "  prints=[" in value else ""
-    if "prints" in task and prints != task["prints"]:
+    if "prints" in task and ", ".join(prints) != task["prints"]:
         return False
     exp = task["expect"]
     try:
         if isinstance(exp, float):
-            return abs(float(v) - exp) <= 1e-12 * max(1.0, abs(exp))
-        return int(v) == exp
+            return abs(float(value) - exp) <= 1e-12 * max(1.0, abs(exp))
+        return int(value) == exp
     except ValueError:
         return False
 
 
+def dry_run():
+    print("=== BIN\n" + BIN)
+    print("=== BASE / MODEL\n" + BASE + "\n" + MODEL)
+    sample = "function %main() -> i64 {\nblock0:\n    v0 = iconst.i64 42\n    return v0\n}"
+    print("=== composed --eval file\n" + compose(sample), end="")
+    fake = "print: 7\nprint: 2.5\nvalue: 42\n; compile 356.5µs  run 1.2µs  96 bytes\n"
+    print("=== fake stdout\n" + fake, end="")
+    value, prints = parse_stdout(fake)
+    print(f"=== parsed\nvalue={value!r} prints={prints!r}")
+    print(f"check(expect=42) -> {check(value, prints, {'expect': 42})}")
+    print(f"check(expect=42, prints='7, 2.5') -> {check(value, prints, {'expect': 42, 'prints': '7, 2.5'})}")
+    print(f"check(expect=43) -> {check(value, prints, {'expect': 43})}")
+    print("=== fake defined-only stdout\n" + "defined: square\n; compile 210µs")
+    print("=== parsed\nvalue=%r prints=%r" % parse_stdout("defined: square\n; compile 210µs\n"))
+    print("=== crash messages\n" + signal_message(4) + "\n" + signal_message(11) + "\n" + signal_message(6))
+    print("=== system prompt tail\n" + SYSTEM[-len(SESSION_STATE) - 40:])
+    if os.access(BIN, os.X_OK):
+        os.makedirs(OUT, exist_ok=True)
+        print("=== live run of the sample through the CLI")
+        print("value=%r prints=%r err=%r" % run(sample))
+    else:
+        print(f"=== not built, skipping the live run: {BIN}")
+
+
+cheatsheet = open(os.path.join(HERE, "cheatsheet.md")).read()
+SYSTEM = cheatsheet.rstrip() + "\n" + SESSION_STATE
+tasks = json.load(open(os.path.join(HERE, "tasks.json")))
+args = sys.argv[1:]
+only = {a for a in args if not a.startswith("-")}
+
+if "--dry-run" in args:
+    dry_run()
+    sys.exit(0)
+
+os.makedirs(OUT, exist_ok=True)
 rows = []
 for task in tasks:
     if only and task["id"] not in only:
         continue
-    messages = [{"role": "system", "content": cheatsheet}, {"role": "user", "content": task["prompt"]}]
+    messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task["prompt"]}]
     log = [f"# {task['id']}: {task['prompt']}\n"]
     attempts = []
     for attempt in range(MAX_RETRIES + 1):
         content, secs, toks, reasoning = chat(messages, 0.1 + 0.3 * attempt)
         code = extract(content)
-        value, err = run(code)
-        ok = check(value, task)
+        value, prints, err = run(code)
+        ok = check(value, prints, task)
         attempts.append({"valid": err is None, "correct": ok, "secs": round(secs, 1), "toks": toks})
-        log.append(f"\n## attempt {attempt} ({secs:.1f}s, {toks} tok)\n{reasoning[:1500]}\n--- content ---\n{content}\n--- extracted ---\n{code}\n--- result ---\nvalue={value} err={err} correct={ok}\n")
+        log.append(f"\n## attempt {attempt} ({secs:.1f}s, {toks} tok)\n{reasoning[:1500]}\n--- content ---\n{content}\n--- extracted ---\n{code}\n--- result ---\nvalue={value} prints={prints} err={err} correct={ok}\n")
         if err is None:
             break
         messages.append({"role": "assistant", "content": content})
