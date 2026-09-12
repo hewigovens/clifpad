@@ -1,0 +1,8 @@
+:buf xs f64 1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0
+:buf hello u8 "hello world"
+:global counter i64 0
+function %main() -> i64 {
+block0:
+    v0 = iconst.i64 42
+    return v0
+}

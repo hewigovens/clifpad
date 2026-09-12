@@ -1,6 +1,6 @@
 # Native Scratchpad — design spec
 
-Status: draft v2, 2026-09-12. Supersedes the POC described in `README.md`. v2 drops MiniLang: Cranelift IR (CLIF) is the only language.
+Status: v2, 2026-09-12, implemented through M4 (see §9). Supersedes the MiniLang POC. v2 drops MiniLang: Cranelift IR (CLIF) is the only language.
 
 ## 1. What this is
 
@@ -306,15 +306,15 @@ The tool description carries the §4 conventions and the cheat sheet from §6 so
 
 Each milestone is shippable on its own and has a test that proves it.
 
-**M1 — CLIF session.** `Session` built on `cranelift-reader` and `JITModule`: parse, resolve host ABI and session functions, verify, compile, run `%main`, return `Outcome` with optimized CLIF, asm, and timing. Globals and buffers via `:global` / `:buf`. `:state`, `:reset`, `:bench`. Acceptance: the `%dot` example in §4.2 runs over two 1M-element buffers in under 2 ms; a verifier error for a missing block argument is returned as text and the session stays usable; `%dot` defined in one eval is callable from the next.
+**M1 — CLIF session.** Done. `src/session.rs` and `src/runtime.rs` implement §4 and §5; `tests/e2e.rs` holds 20 acceptance tests including the 1M-element dot product (measured 0.8 to 0.95 ms, bar is 2 ms), verifier error text, persistence, redefinition, the dlsym gate, allocation limits, and reset.
 
 **M2 — model experiment.** Done for Qwen3.8-Flash, see §11.1: 19 of 22 tasks correct on the first try, 20 of 22 within two retries. The task set in `prompts/tasks.json` is the regression suite for the prompt; rerun it whenever the cheat sheet or the host ABI changes, and against Deepseek when available. Remaining M2 work: wire `prompts/experiment.py` to the real binary once M1 lands.
 
-**M3 — MCP server.** The five tools above. Acceptance: Claude Code with the server configured answers "what is `0x8000_0000_0000_0000 >> 63` as signed vs logical shift?" using `scratch_eval` rather than writing a Rust file.
+**M3 — MCP server.** Done. `src/mcp.rs` serves the five tools over newline-delimited JSON-RPC; `scripts/mcp_smoke.py` exercises the handshake, every tool, the verifier error path, and clean EOF exit. The Claude Code acceptance check (answering the shift question through `scratch_eval`) is still to be run by hand: `claude mcp add scratch -- target/release/smart-repl --mcp`.
 
-**M4 — NL layer in the CLI.** Prompt, history, retry on verifier errors, `:save` / `:load`. Acceptance: the M2 task set passes at the measured rate through the CLI against a local model.
+**M4 — NL layer in the CLI.** Done in code: `src/nl.rs` and the REPL in `src/main.rs` implement the prompt, six-message history, and the retry loop with a temperature ramp; `:save` / `:load` exist. Verified against stub servers for prompt shape, retries, exhaustion, and network failure. Not yet verified against the real local model from the CLI, because the model server was unreachable when the frontends were merged; `prompts/experiment.py` now drives the real binary and is the way to do that.
 
-**M5 — polish.** `dlsym` behind `--allow-unsafe`, resource caps, README rewrite, crate rename.
+**M5 — polish.** Remaining: a hang timeout in the CLI (§8 requires it in every frontend; today only MCP has process isolation, via the host), a signal handler or forked worker so a trap does not kill the REPL, crate rename. Done already: `dlsym` behind `--allow-unsafe`, resource caps, README rewrite.
 
 ## 10. Crate layout after M1
 
@@ -328,9 +328,13 @@ src/
   main.rs       CLI: REPL, --eval, --mcp
 tests/
   e2e.rs        per-milestone acceptance tests
+scripts/
+  mcp_smoke.py  end-to-end check of the MCP server over stdio
 prompts/
   cheatsheet.md CLIF reference shared by the NL prompt and the MCP tool description
-  tasks/        the M2 task set, one file per task with expected result
+  tasks.json    the M2 task set with expected results
+  experiment.py harness: model → CLI --eval → score, with error-only retries
+  results/      run logs
 ```
 
 Kept from the POC: the REPL shell and command dispatch in `main.rs`, the Cranelift module and host-symbol registration pattern in `jit.rs`, the model client in `ai.rs`. `lang.rs`, `compile.rs`, `value.rs`, and `state.rs` are deleted.
