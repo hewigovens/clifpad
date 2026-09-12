@@ -84,7 +84,8 @@ Any input line that is not a command and not CLIF is sent to an OpenAI-compatibl
 |---|---|---|
 | `SMART_REPL_BASE_URL` or `OPENAI_BASE_URL` | `http://127.0.0.1:11434/v1` | server base URL |
 | `SMART_REPL_MODEL` or `OPENAI_MODEL` | `qwen3` | model name |
-| `SMART_REPL_API_KEY` or `OPENAI_API_KEY` | unset | optional; local servers usually need none |
+| `SMART_REPL_API_KEY` | unset | optional bearer token, sent to whatever base URL is configured |
+| `OPENAI_API_KEY` | unset | used only when the base URL host is `api.openai.com`, so a key in your shell is never sent to a local or mistyped server |
 | `SMART_REPL_OFFLINE` | unset | `1` disables the model |
 
 A `.env` file is loaded if present. Measured against a local Qwen3.8-Flash: 19 of 22 mixed tasks correct on the first try, 1 to 3 seconds each. The task set and harness are in `prompts/`.

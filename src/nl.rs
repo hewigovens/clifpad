@@ -59,6 +59,16 @@ pub struct Client {
     http: OnceCell<reqwest::blocking::Client>,
 }
 
+/// True when `base_url` points at OpenAI itself (`https://api.openai.com/...`).
+fn is_openai_host(base_url: &str) -> bool {
+    let rest = base_url
+        .strip_prefix("https://")
+        .or_else(|| base_url.strip_prefix("http://"))
+        .unwrap_or(base_url);
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    host.eq_ignore_ascii_case("api.openai.com")
+}
+
 impl Client {
     /// Reads `.env` and the environment. `offline_flag` is `--offline`; the
     /// API key is optional because most local servers do not want one.
@@ -68,12 +78,22 @@ impl Client {
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
         let model =
             first_env(&["SMART_REPL_MODEL", "OPENAI_MODEL"]).unwrap_or_else(|| DEFAULT_MODEL.to_string());
-        let api_key = first_env(&["SMART_REPL_API_KEY", "OPENAI_API_KEY"]);
+        let base_url = base_url.trim_end_matches('/').to_string();
+        // SMART_REPL_API_KEY is explicit and always sent. OPENAI_API_KEY is
+        // scoped to OpenAI: sending it as a bearer token to a LAN server or a
+        // mistyped host would leak it, so it is only used for api.openai.com.
+        let api_key = first_env(&["SMART_REPL_API_KEY"]).or_else(|| {
+            if is_openai_host(&base_url) {
+                first_env(&["OPENAI_API_KEY"])
+            } else {
+                None
+            }
+        });
         let env_offline = first_env(&["SMART_REPL_OFFLINE"])
             .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
             .unwrap_or(false);
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base_url,
             model,
             api_key,
             enabled: !offline_flag && !env_offline,
@@ -275,5 +295,14 @@ mod tests {
     fn truncate_respects_char_boundaries() {
         assert_eq!(truncate("abc", 8), "abc");
         assert_eq!(truncate("µµµµ", 3), "µ…");
+    }
+
+    #[test]
+    fn openai_key_only_goes_to_openai() {
+        assert!(is_openai_host("https://api.openai.com/v1"));
+        assert!(is_openai_host("https://API.openai.com:443/v1/"));
+        assert!(!is_openai_host("http://192.168.50.53:11234/v1"));
+        assert!(!is_openai_host("https://api.openai.com.evil.example/v1"));
+        assert!(!is_openai_host("http://127.0.0.1:11434/v1"));
     }
 }
