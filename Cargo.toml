@@ -1,0 +1,20 @@
+[package]
+name = "smart-repl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "AI-powered Smart REPL that JIT-compiles generated MiniLang with Cranelift"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1"
+cranelift = "0.135"
+cranelift-jit = "0.135"
+cranelift-module = "0.135"
+cranelift-native = "0.135"
+cranelift-reader = "0.135"
+dotenvy = "0.15"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

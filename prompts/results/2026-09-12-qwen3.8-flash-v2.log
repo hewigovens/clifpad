@@ -1,0 +1,30 @@
+const          first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    2.0s 39 tok
+popcnt         first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.1s 55 tok
+sshr           first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.6s 80 tok
+ushr           first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.5s 80 tok
+wrap           first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.4s 80 tok
+sum100         first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    2.7s 171 tok
+fp01           first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.1s 64 tok
+sqrt2          first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    0.9s 47 tok
+fncall         first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    2.0s 115 tok
+sumbuf         first: valid=False correct=False | final: valid=True  correct=True  retries=2   23.9s 1486 tok
+countl         first: valid=False correct=False | final: valid=False correct=False retries=2   19.1s 948 tok
+print          first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    2.8s 81 tok
+max            first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.4s 79 tok
+fib            first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    3.1s 198 tok
+ctz            first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.0s 48 tok
+fcvt           first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.1s 63 tok
+udiv           first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.2s 64 tok
+bswap          first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.2s 64 tok
+nan            first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.5s 71 tok
+fma            first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.3s 80 tok
+storecounter   first: valid=True  correct=True  | final: valid=True  correct=True  retries=0    1.5s 89 tok
+gcd            first: valid=False correct=False | final: valid=False correct=False retries=2   11.9s 627 tok
+
+SUMMARY
+tasks: 22
+first-try valid:   19/22
+first-try correct: 19/22
+final valid:       20/22
+final correct:     20/22
+total time: 85s, total completion tokens: 4629
