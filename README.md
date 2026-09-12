@@ -1,198 +1,116 @@
-# Smart REPL (Cranelift JIT)
+# smart-repl — a native scratchpad
 
-An interactive REPL that turns natural language (or a tiny code subset) into
-native machine code.
+Small programs written in Cranelift IR (CLIF) are JIT-compiled and run in-process in milliseconds, and every run reports what happened at the machine level: value, optimized IR, disassembly, timing. There is no compile, link, or launch step.
 
-Pipeline:
+It is meant for the questions a Python snippet cannot answer: bit-exact integer semantics, float edge cases, calling a C symbol already in the process, microbenchmarks, and "what does this compile to". Three frontends share one `Session`:
 
-```
-user input  →  LLM / offline translator  →  MiniLang
-            →  Cranelift IR  →  in-memory JIT  →  execute
-            →  persistent REPL state
-```
+| Frontend | Who | Input |
+|---|---|---|
+| Rust library | programs embedding it | CLIF text |
+| CLI REPL | a developer | CLIF text, or natural language translated by a model |
+| MCP server | a coding agent (Claude Code, Cursor, …) | CLIF text |
 
-See [DESIGN.md](DESIGN.md) for where this is going: a CLIF-only native scratchpad with an MCP server, replacing MiniLang.
+The design, the verified assumptions behind it, and the model experiment are in [DESIGN.md](DESIGN.md). The CLIF reference given to models lives in [prompts/cheatsheet.md](prompts/cheatsheet.md).
 
-This is a prototype: the language is small on purpose. Cranelift is used for
-real native arithmetic, control flow, and calls into a host runtime that owns
-the typed REPL state (`i64`, `f64`, `bool`, `string`, `list`).
-
-## How to run
+## Build and run
 
 ```bash
-# optional, for nicer local config
-cp .env.example .env
-
-cargo run --release
-```
-
-Useful entry points:
-
-```bash
-cargo run -- --demo          # scripted AI → JIT → state walkthrough (no API key)
-cargo run -- --eval '2 + 3 * 4'
+cargo build --release
 cargo test
+
+# interactive REPL
+cargo run --release
+
+# run a file of REPL input non-interactively
+cargo run --release -- --eval examples.clif
+
+# MCP server over stdio
+cargo run --release -- --mcp
 ```
 
-In the REPL, type natural language or MiniLang. Commands start with `:`.
+Flags: `--eval FILE`, `--mcp`, `--asm` (print disassembly), `--offline` (never call the model), `--allow-unsafe` (let CLIF import any process symbol via `dlsym`), `--help`.
+
+## Writing programs
+
+A program is one or more CLIF functions. `%main` is the entry and must be `() -> i64`, `() -> f64`, or `()`. Other functions persist in the session and can be imported by name from later programs.
+
+```clif
+function %square(i64) -> i64 {
+block0(v0: i64):
+    v1 = imul v0, v0
+    return v1
+}
+
+function %main() -> i64 {
+    sig0 = (i64) -> i64
+    fn0 = %square sig0
+block0:
+    v0 = iconst.i64 12
+    v1 = call fn0(v0)
+    return v1
+}
+```
+
+Three things differ from CLIF you may have seen elsewhere:
+
+- Cranelift 0.135 has no immediate-form instructions (`iadd_imm`, `ishl_imm`, …). Put the constant in a value with `iconst` first.
+- Do not write a calling convention. The session rewrites every signature to the host's C convention.
+- Decimal float literals like `f64const 0.1` are accepted; the session converts them to the hex form the parser needs.
+
+Session memory is declared with commands and referenced as symbols:
 
 ```
-smart> :help
-smart> 2 + 3 * 4
-smart> set n to 1
-smart> increment n
-smart> :state
-smart> :quit
+clif> :buf xs f64 1.0,2.0,3.0
+clif> :global counter i64 0
+clif> function %main() -> f64 {
+   ..     gv0 = symbol %xs
+   .. block0:
+   ..     v0 = symbol_value.i64 gv0     ; address of xs
+   ..     v1 = load.f64 v0
+   ..     return v1
+   .. }
+value: 1.0
 ```
 
-## Environment variables
+Host functions available to programs: `%rt_print_i64 (i64)`, `%rt_print_f64 (f64)`, `%rt_print_str (i64, i64)`, `%rt_now_ns () -> i64`, `%rt_alloc (i64) -> i64`, `%rt_fail (i64)`.
 
-The LLM backend is an OpenAI-compatible HTTP API. All of these are optional;
-without a key the REPL uses a small offline translator and still JIT-compiles
-MiniLang.
+REPL commands: `:help` `:state` `:reset` `:global NAME TYPE [VALUE]` `:buf NAME TYPE LEN|v1,v2,…|"text"` `:asm` `:clif` `:bench N` `:save FILE` `:load FILE` `:online` `:offline` `:quit`.
 
-| Variable | Also accepted as | Default | Purpose |
-|---|---|---|---|
-| `SMART_REPL_API_KEY` | `OPENAI_API_KEY` | unset | API key |
-| `SMART_REPL_BASE_URL` | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL (`/chat/completions` is appended) |
-| `SMART_REPL_MODEL` | `OPENAI_MODEL` | `gpt-4o-mini` | Model name |
-| `SMART_REPL_OFFLINE` | | unset | Set to `1` to force the offline translator |
+## Natural language (CLI only)
 
-Examples:
+Any input line that is not a command and not CLIF is sent to an OpenAI-compatible model, which replies with CLIF that is shown and then run. Parse and verifier errors are fed back for up to two retries.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SMART_REPL_BASE_URL` or `OPENAI_BASE_URL` | `http://127.0.0.1:11434/v1` | server base URL |
+| `SMART_REPL_MODEL` or `OPENAI_MODEL` | `qwen3` | model name |
+| `SMART_REPL_API_KEY` or `OPENAI_API_KEY` | unset | optional; local servers usually need none |
+| `SMART_REPL_OFFLINE` | unset | `1` disables the model |
+
+A `.env` file is loaded if present. Measured against a local Qwen3.8-Flash: 19 of 22 mixed tasks correct on the first try, 1 to 3 seconds each. The task set and harness are in `prompts/`.
+
+## MCP server
+
+`smart-repl --mcp` serves one session over stdio with the tools `scratch_eval`, `scratch_bench`, `scratch_alloc`, `scratch_state`, and `scratch_reset`. The `scratch_eval` tool description carries the full CLIF reference, so the agent needs nothing else.
 
 ```bash
-export OPENAI_API_KEY=sk-...
-export OPENAI_MODEL=gpt-4o-mini
-cargo run
-
-# Any OpenAI-compatible provider (Groq, Together, vLLM, Ollama, …)
-export OPENAI_BASE_URL=http://127.0.0.1:11434/v1
-export OPENAI_API_KEY=ollama
-export OPENAI_MODEL=llama3
-cargo run
+claude mcp add scratch -- /path/to/target/release/smart-repl --mcp
 ```
 
-## Example session
+Each server process holds its own session. If a program crashes or hangs, only that process dies; the host's tool timeout reports it.
 
-The `--demo` flag prints this loop without needing a network:
+## Safety
 
-```
-=== demo: hardcoded Cranelift JIT ===
-  compiled f(x) = x + 37
-  f(5) = 42
+This is not a sandbox. CLIF has raw loads and stores, so a bad address crashes the process, and integer division by zero traps. Session buffers are the only memory a well-behaved program touches. Importing arbitrary process symbols requires `--allow-unsafe`. See DESIGN.md §8.
 
-=== demo: natural language → MiniLang → JIT → state ===
+## Layout
 
--- turn 1 --
-  → input: set n to 1
-  ⚙ generated: via offline translator
-           set("n", 1)
-  ⚡ jit: compiled run_0
-  ← 1
-  state:
-           variables:
-             n: i64 = 1
-
--- turn 2 --
-  → input: increment n
-  ⚙ generated: via offline translator
-           set("n", (get("n") ?? 0) + 1)
-  ⚡ jit: compiled run_1
-  ← 2
-  state:
-           variables:
-             n: i64 = 2
-
--- turn 3 --
-  → input: set("label", "hello " + str(get("n")))
-  ⚙ generated: via MiniLang (direct)
-           set("label", "hello " + str(get("n")))
-  ⚡ jit: compiled run_2
-  ← "hello 2"
-  state:
-           variables:
-             label: string = "hello 2"
-             n: i64 = 2
-```
-
-Interactive equivalent with an LLM key:
-
-```
-$ cargo run
-smart-repl  (Cranelift JIT)
-backend: gpt-4o-mini  @ https://api.openai.com/v1
-
-smart> set n to 1
-  → input: set n to 1
-  ⚙ generated: via LLM
-           set("n", 1)
-  ⚡ jit: compiled run_1
-  ← 1
-
-smart> increment n
-  → input: increment n
-  ⚙ generated: via LLM
-           set("n", (get("n") ?? 0) + 1)
-  ⚡ jit: compiled run_2
-  ← 2
-
-smart> :state
-variables:
-  n: i64 = 2
-```
-
-Direct MiniLang skips the model and still goes through Cranelift:
-
-```
-smart> 2 + 3 * 4
-  ← 14
-
-smart> fn add(a, b) { a + b }
-  ← "defined add"
-
-smart> add(10, 32)
-  ← 42
-```
-
-## MiniLang (what the JIT actually compiles)
-
-```
-let x = 1
-x = x + 2
-if x > 2 { set("ok", true) } else { set("ok", false) }
-while x < 10 { x = x + 1 }
-fn add(a, b) { a + b }
-
-get("n") ?? 0
-set("n", 1)
-del("n")
-keys()
-print("hello", n)
-len(xs)  push(xs, v)  list(1, 2, 3)
-str(x)  int(x)  float(x)  typeof(x)
-error("nope")
-```
-
-Types: `null`, `bool`, `i64`, `f64`, `string`, `list`.
-
-REPL commands: `:help` `:state` `:clear` `:history` `:code` `:ir` `:retry`
-`:offline` `:online` `:verbose` `:quit`.
-
-## Project layout
-
-| File | Role |
+| Path | Role |
 |---|---|
-| `src/main.rs` | REPL loop, `--demo`, `--eval` |
-| `src/ai.rs` | OpenAI-compatible client + offline translator |
-| `src/lang.rs` | MiniLang parser / AST |
-| `src/compile.rs` | AST → Cranelift IR |
-| `src/jit.rs` | `cranelift-jit` module, host ABI, execution |
-| `src/state.rs` | Persistent variables + runtime heap |
-| `src/value.rs` | Typed values and operators |
-
-## Notes
-
-- Not a sandbox. Generated code can call the host runtime freely.
-- Not full Rust. The model is steered toward MiniLang so Cranelift can lower it.
-- Literal `i64`/`f64` arithmetic is emitted as native Cranelift instructions
-  (`iadd`, `imul`, `fadd`, …). State, strings, and lists go through host calls.
+| `src/session.rs` | parse, resolve imports, verify, compile, run, bench, state |
+| `src/runtime.rs` | session memory, host ABI, allocation limits |
+| `src/mcp.rs` | MCP server over stdio |
+| `src/nl.rs` | model client and prompt (binary only) |
+| `src/main.rs` | CLI |
+| `tests/e2e.rs` | acceptance tests per DESIGN.md milestones |
+| `prompts/` | CLIF cheat sheet, task set, experiment harness, results |

@@ -259,6 +259,16 @@ impl Session {
         Ok(addr)
     }
 
+    /// NUL-terminated variant of `declare_bytes` for C-string FFI calls.
+    pub fn declare_cstr(&mut self, name: &str, text: &str) -> Result<usize> {
+        let addr = self.runtime.declare_cstr(name, text)?;
+        let len_addr = self.runtime.global_addr(&format!("{name}_len")).unwrap();
+        let mut syms = self.symbols.lock().unwrap();
+        syms.insert(name.to_string(), addr);
+        syms.insert(format!("{name}_len"), len_addr);
+        Ok(addr)
+    }
+
     pub fn state(&self) -> StateReport {
         let mut functions: Vec<FunctionInfo> = self
             .fns

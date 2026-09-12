@@ -198,8 +198,64 @@ impl Runtime {
         Ok(addr)
     }
 
+    /// Like `declare_bytes` but NUL-terminated, for `dlsym` calls that take a
+    /// C string. `<name>_len` still holds the length without the NUL.
+    pub fn declare_cstr(&mut self, name: &str, text: &str) -> Result<usize> {
+        if text.as_bytes().contains(&0) {
+            bail!("C string %{name} must not contain NUL bytes");
+        }
+        let mut data = text.as_bytes().to_vec();
+        data.push(0);
+        let addr = self.declare_bytes(name, &data)?;
+        let len_name = format!("{name}_len");
+        self.globals
+            .get_mut(&len_name)
+            .unwrap()
+            .bytes_mut()
+            .copy_from_slice(&(text.len() as i64).to_ne_bytes());
+        Ok(addr)
+    }
+
     pub fn global_addr(&self, name: &str) -> Option<usize> {
         self.globals.get(name).map(Global::addr)
+    }
+
+    /// Write `values` into an existing `i64` global, starting at element 0.
+    pub fn write_i64(&mut self, name: &str, values: &[i64]) -> Result<()> {
+        let g = self.global_mut(name, ElemType::I64, values.len())?;
+        for (chunk, v) in g.bytes_mut().chunks_exact_mut(8).zip(values) {
+            chunk.copy_from_slice(&v.to_ne_bytes());
+        }
+        Ok(())
+    }
+
+    /// Write `values` into an existing `f64` global, starting at element 0.
+    pub fn write_f64(&mut self, name: &str, values: &[f64]) -> Result<()> {
+        let g = self.global_mut(name, ElemType::F64, values.len())?;
+        for (chunk, v) in g.bytes_mut().chunks_exact_mut(8).zip(values) {
+            chunk.copy_from_slice(&v.to_ne_bytes());
+        }
+        Ok(())
+    }
+
+    /// Write `values` into an existing `u8` global, starting at element 0.
+    pub fn write_u8(&mut self, name: &str, values: &[u8]) -> Result<()> {
+        let g = self.global_mut(name, ElemType::U8, values.len())?;
+        g.bytes_mut()[..values.len()].copy_from_slice(values);
+        Ok(())
+    }
+
+    fn global_mut(&mut self, name: &str, ty: ElemType, n: usize) -> Result<&mut Global> {
+        let Some(g) = self.globals.get_mut(name) else {
+            bail!("no global %{name}; declare it first");
+        };
+        if g.ty != ty {
+            bail!("global %{name} is {}[{}], not {}", g.ty.name(), g.len, ty.name());
+        }
+        if n > g.len {
+            bail!("global %{name} has {} elements, cannot write {n}", g.len);
+        }
+        Ok(g)
     }
 
     fn charge(&mut self, bytes: usize) -> Result<()> {
@@ -375,6 +431,19 @@ mod tests {
         assert_eq!(rt.globals["hello"].bytes(), b"hello world");
         assert_eq!(rt.globals["hello_len"].preview(8), "[11]");
         assert_eq!(rt.globals["hello"].preview(8), "\"hello world\"");
+    }
+
+    #[test]
+    fn typed_writes_and_cstr() {
+        let mut rt = Runtime::new();
+        rt.declare("xs", ElemType::F64, 3).unwrap();
+        rt.write_f64("xs", &[1.5, 2.5]).unwrap();
+        assert_eq!(rt.globals["xs"].preview(8), "[1.5, 2.5, 0]");
+        assert!(rt.write_f64("xs", &[0.0; 4]).is_err());
+        assert!(rt.write_i64("xs", &[1]).is_err());
+        rt.declare_cstr("s", "hi").unwrap();
+        assert_eq!(rt.globals["s"].bytes(), b"hi\0");
+        assert_eq!(rt.globals["s_len"].preview(8), "[2]");
     }
 
     #[test]
