@@ -6,6 +6,9 @@ rust-version = "1.95"
 description = "A native scratchpad: Cranelift IR text in, JIT-compiled machine behaviour out, for developers and coding agents"
 license = "MIT"
 readme = "README.md"
+repository = "https://github.com/hewigovens/clifpad"
+keywords = ["cranelift", "jit", "repl", "mcp", "scratchpad"]
+categories = ["development-tools", "compilers"]
 
 [dependencies]
 anyhow = "1"

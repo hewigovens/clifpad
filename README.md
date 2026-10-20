@@ -12,6 +12,10 @@ It is meant for the questions a Python snippet cannot answer: bit-exact integer 
 
 The design, the verified assumptions behind it, and the model experiment are in [DESIGN.md](DESIGN.md). The CLIF reference given to models lives in [prompts/cheatsheet.md](prompts/cheatsheet.md).
 
+## Platforms
+
+Developed and tested on macOS on Apple silicon. Linux on x86_64 and aarch64 should work, since Cranelift and the worker only need Unix process APIs, but it is not tested yet. Windows is not supported: the worker that isolates crashes relies on Unix signals.
+
 ## Build and run
 
 ```bash
@@ -111,7 +115,13 @@ This is not a sandbox. CLIF has raw loads and stores, so a bad address crashes t
 | `src/session.rs` | parse, resolve imports, verify, compile, run, bench, state |
 | `src/runtime.rs` | session memory, host ABI, allocation limits |
 | `src/mcp.rs` | MCP server over stdio |
+| `src/worker.rs` | `Supervisor`: runs JIT code in a worker process, restores the session after a crash or timeout |
 | `src/nl.rs` | model client and prompt (binary only) |
 | `src/main.rs` | CLI |
 | `tests/e2e.rs` | acceptance tests per DESIGN.md milestones |
+| `tests/isolation.rs` | crash, hang, replay and timeout through a real worker |
 | `prompts/` | CLIF cheat sheet, task set, experiment harness, results |
+
+## License
+
+MIT, see `LICENSE`.

@@ -23,8 +23,8 @@ import json, os, re, subprocess, sys, time, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-BASE = os.environ.get("CLIFPAD_BASE_URL", "http://192.168.50.53:11234/v1")
-MODEL = os.environ.get("CLIFPAD_MODEL", "Qwen3.8-Flash-Next-MLX-Serve-mixed-4-8bit")
+BASE = os.environ.get("CLIFPAD_BASE_URL", "http://127.0.0.1:11434/v1")
+MODEL = os.environ.get("CLIFPAD_MODEL", "qwen3")
 BIN = os.environ.get("CLIFPAD_BIN", os.path.join(ROOT, "target", "debug", "clifpad"))
 OUT = os.path.join(HERE, os.environ.get("RUNS", "runs"))
 MAX_RETRIES = 2

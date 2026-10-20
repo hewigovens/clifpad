@@ -301,7 +301,7 @@ mod tests {
     fn openai_key_only_goes_to_openai() {
         assert!(is_openai_host("https://api.openai.com/v1"));
         assert!(is_openai_host("https://API.openai.com:443/v1/"));
-        assert!(!is_openai_host("http://192.168.50.53:11234/v1"));
+        assert!(!is_openai_host("http://192.168.1.10:8080/v1"));
         assert!(!is_openai_host("https://api.openai.com.evil.example/v1"));
         assert!(!is_openai_host("http://127.0.0.1:11434/v1"));
     }

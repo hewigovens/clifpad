@@ -25,6 +25,17 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Prints kept for a crash report; the tail is what explains a crash.
 const PRINTS_KEPT: usize = 10;
+
+// Signal numbers differ between Linux and the BSDs (SIGBUS is 7 vs 10); the
+// rest are the same on every Unix this builds for.
+const SIGILL: i32 = 4;
+const SIGABRT: i32 = 6;
+const SIGFPE: i32 = 8;
+const SIGSEGV: i32 = 11;
+#[cfg(target_os = "linux")]
+const SIGBUS: i32 = 7;
+#[cfg(not(target_os = "linux"))]
+const SIGBUS: i32 = 10;
 const STDERR_KEPT: usize = 4096;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -340,22 +351,24 @@ impl Supervisor {
 fn crash_cause(status: Option<ExitStatus>, stderr: &str) -> String {
     let signal = status.and_then(|s| s.signal());
     match signal {
-        Some(4) => "The program crashed with a Cranelift trap (SIGILL): division or remainder by zero, \
+        Some(sig @ (SIGILL | SIGFPE)) => format!(
+            "The program crashed with a Cranelift trap ({}): division or remainder by zero, \
             signed division overflow (INT_MIN / -1), a float-to-int conversion of NaN or an out-of-range \
-            value, or an explicit trap."
-            .into(),
-        Some(sig @ (10 | 11)) => format!(
+            value, or an explicit trap.",
+            if sig == SIGILL { "SIGILL" } else { "SIGFPE" }
+        ),
+        Some(sig @ (SIGSEGV | SIGBUS)) => format!(
             "The program crashed on a bad memory access ({}): most often an address used where a \
              loaded value was meant (symbol_value gives an address, load from it), or an index past \
              the end of a buffer.",
-            if sig == 11 { "SIGSEGV" } else { "SIGBUS" }
+            if sig == SIGSEGV { "SIGSEGV" } else { "SIGBUS" }
         ),
-        Some(6) if stderr.contains("overflowed its stack") => "The program overflowed the stack (SIGABRT): \
+        Some(SIGABRT) if stderr.contains("overflowed its stack") => "The program overflowed the stack (SIGABRT): \
             recursion without a reachable base case, or recursion too deep for the stack."
             .into(),
         Some(sig) => {
             let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("");
-            let name = if sig == 6 { "SIGABRT".to_string() } else { format!("signal {sig}") };
+            let name = if sig == SIGABRT { "SIGABRT".to_string() } else { format!("signal {sig}") };
             if last.is_empty() {
                 format!("The program was killed by {name}.")
             } else {
