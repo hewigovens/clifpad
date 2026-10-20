@@ -8,9 +8,11 @@ use std::time::Instant;
 
 use anyhow::{Result, bail};
 use cranelift::prelude::{Type, types};
+use serde::{Deserialize, Serialize};
 
 /// Element type of a global slot or buffer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ElemType {
     I64,
     F64,
@@ -118,6 +120,9 @@ impl Global {
 pub struct Runtime {
     pub globals: BTreeMap<String, Global>,
     pub prints: Vec<String>,
+    /// Called with each print as it happens. The worker uses it to stream
+    /// prints out, so they survive a crash later in the same run.
+    pub print_sink: Option<fn(&str)>,
     pub error: Option<String>,
     allocs: Vec<Vec<u64>>,
     pub alloc_total: usize,
@@ -144,6 +149,7 @@ impl Runtime {
         Box::new(Self {
             globals: BTreeMap::new(),
             prints: Vec::new(),
+            print_sink: None,
             error: None,
             allocs: Vec::new(),
             alloc_total: 0,
@@ -278,6 +284,13 @@ impl Runtime {
         EvalGuard(())
     }
 
+    fn print(&mut self, s: String) {
+        if let Some(sink) = self.print_sink {
+            sink(&s);
+        }
+        self.prints.push(s);
+    }
+
     fn with<R>(f: impl FnOnce(&mut Runtime) -> R) -> Option<R> {
         let p = CURRENT.with(Cell::get);
         if p.is_null() {
@@ -361,23 +374,23 @@ pub fn host_table() -> Vec<HostFn> {
 }
 
 extern "C" fn rt_print_i64(v: i64) {
-    Runtime::with(|r| r.prints.push(v.to_string()));
+    Runtime::with(|r| r.print(v.to_string()));
 }
 
 extern "C" fn rt_print_f64(v: f64) {
-    Runtime::with(|r| r.prints.push(v.to_string()));
+    Runtime::with(|r| r.print(v.to_string()));
 }
 
 extern "C" fn rt_print_str(ptr: i64, len: i64) {
     Runtime::with(|r| {
         if ptr <= 0 || len < 0 || len > (64 << 20) {
-            r.prints.push(format!("<invalid string ptr={ptr} len={len}>"));
+            r.print(format!("<invalid string ptr={ptr} len={len}>"));
             return;
         }
         // SAFETY: the caller asserts ptr..ptr+len is readable; this is JIT
         // code and is inherently unchecked (DESIGN.md §8).
         let bytes = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
-        r.prints.push(String::from_utf8_lossy(bytes).into_owned());
+        r.print(String::from_utf8_lossy(bytes).into_owned());
     });
 }
 

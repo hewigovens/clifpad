@@ -99,4 +99,4 @@ The functions and globals currently defined in the session are listed after this
 - `fcmp` conditions are `eq ne lt le gt ge uno ord` (not `neq`); `icmp` conditions are `eq ne slt sle sgt sge ult ule ugt uge`.
 - `icmp` returns i8; that is fine to feed into `brif` and `select`.
 - In a loop, every value that changes per iteration (index, accumulator, pointer) must be a block argument of the loop header and passed on the back-edge `jump`. Adding to a constant defined in block0 does not accumulate.
-- Recursion and loops that divide must guarantee the divisor is never 0; division by zero traps and kills the process.
+- Recursion and loops that divide must guarantee the divisor is never 0; division by zero traps and the call fails.

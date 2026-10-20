@@ -28,7 +28,7 @@ cargo run --release -- --eval examples.clif
 cargo run --release -- --mcp
 ```
 
-Flags: `--eval FILE`, `--mcp`, `--asm` (print disassembly), `--offline` (never call the model), `--allow-unsafe` (let CLIF import any process symbol via `dlsym`), `--help`.
+Flags: `--eval FILE`, `--mcp`, `--asm` (print disassembly), `--offline` (never call the model), `--allow-unsafe` (let CLIF import any process symbol via `dlsym`), `--timeout SECS` (kill a run that takes longer, default 10, also `CLIFPAD_TIMEOUT`), `--help`.
 
 ## Writing programs
 
@@ -98,11 +98,11 @@ A `.env` file is loaded if present. Measured against a local Qwen3.8-Flash: 19 o
 claude mcp add clifpad -- /path/to/target/release/clifpad --mcp
 ```
 
-Each server process holds its own session. If a program crashes or hangs, only that process dies; the host's tool timeout reports it.
+Each server process holds its own session. Programs run in a worker process: if one crashes or runs past the timeout, that tool call fails with the cause and whatever the program printed, and the session is restored. Functions and buffers come back; values stored into buffers since they were allocated do not.
 
 ## Safety
 
-This is not a sandbox. CLIF has raw loads and stores, so a bad address crashes the process, and integer division by zero traps. Session buffers are the only memory a well-behaved program touches. Importing arbitrary process symbols requires `--allow-unsafe`. See DESIGN.md §8.
+This is not a sandbox. CLIF has raw loads and stores, so a bad address crashes the worker process, and integer division by zero traps. Both frontends survive that and restore the session. Session buffers are the only memory a well-behaved program touches. Importing arbitrary process symbols requires `--allow-unsafe`. See DESIGN.md §8.
 
 ## Layout
 

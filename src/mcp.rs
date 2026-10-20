@@ -5,12 +5,14 @@
 //! written to stdout; diagnostics go to stderr.
 
 use std::io::{BufRead, Write};
+use std::time::Duration;
 
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 
 use crate::runtime::ElemType;
-use crate::session::{BenchResult, EvalOptions, Outcome, Session};
+use crate::session::{Backend, BenchResult, EvalOptions, Init, Outcome};
+use crate::worker::Supervisor;
 
 /// Protocol version we speak when the client asks for one we do not know.
 const DEFAULT_PROTOCOL: &str = "2024-11-05";
@@ -26,16 +28,20 @@ const CHEATSHEET: &str = include_str!("../prompts/cheatsheet.md");
 const MAX_ITERATIONS: u64 = 10_000_000;
 const DEFAULT_ITERATIONS: u64 = 1000;
 
-/// Serve one `Session` over stdin/stdout until EOF.
-pub fn serve(allow_unsafe: bool) -> Result<()> {
+/// Serve one session over stdin/stdout until EOF. JIT code runs in a worker
+/// process, so a crash or hang fails one tool call, not the server.
+pub fn serve(allow_unsafe: bool, timeout: Duration) -> Result<()> {
     if allow_unsafe {
         eprintln!(
             "warning: --allow-unsafe is on: CLIF may import any symbol dlsym can find in this \
              process. A bad call can corrupt memory or kill the server."
         );
     }
-    let mut session = Session::new(allow_unsafe)?;
-    eprintln!("clifpad MCP server on stdio (allow_unsafe={allow_unsafe})");
+    let mut session = Supervisor::from_current_exe(allow_unsafe, timeout)?;
+    eprintln!(
+        "clifpad MCP server on stdio (allow_unsafe={allow_unsafe}, timeout={}s)",
+        timeout.as_secs_f64()
+    );
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
@@ -54,7 +60,7 @@ pub fn serve(allow_unsafe: bool) -> Result<()> {
 
 /// One request line in, at most one response line out. `None` for
 /// notifications and anything else that must not be answered.
-fn handle_line(session: &mut Session, line: &str) -> Option<String> {
+fn handle_line(session: &mut dyn Backend, line: &str) -> Option<String> {
     let msg: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(e) => {
@@ -156,7 +162,7 @@ fn session_error(e: anyhow::Error) -> Fail {
     Fail::Tool(format!("{e:#}"))
 }
 
-fn call_tool(session: &mut Session, params: &Value) -> Result<Value, RpcError> {
+fn call_tool(session: &mut dyn Backend, params: &Value) -> Result<Value, RpcError> {
     let result = run_tool(session, params);
     match result {
         Ok(text) => Ok(content(&text, false)),
@@ -165,7 +171,7 @@ fn call_tool(session: &mut Session, params: &Value) -> Result<Value, RpcError> {
     }
 }
 
-fn run_tool(session: &mut Session, params: &Value) -> Result<String, Fail> {
+fn run_tool(session: &mut dyn Backend, params: &Value) -> Result<String, Fail> {
     let obj = params
         .as_object()
         .ok_or_else(|| Fail::invalid_params("params must be an object with \"name\""))?;
@@ -183,7 +189,7 @@ fn run_tool(session: &mut Session, params: &Value) -> Result<String, Fail> {
         "clifpad_eval" => tool_eval(session, args),
         "clifpad_bench" => tool_bench(session, args),
         "clifpad_alloc" => tool_alloc(session, args),
-        "clifpad_state" => Ok(session.state().to_string()),
+        "clifpad_state" => Ok(session.state().map_err(session_error)?.to_string()),
         "clifpad_reset" => {
             session.reset().map_err(session_error)?;
             Ok("ok".to_string())
@@ -203,7 +209,7 @@ fn content(text: &str, is_error: bool) -> Value {
 
 // ------------------------------------------------------------------- tools
 
-fn tool_eval(session: &mut Session, args: &Map<String, Value>) -> Result<String, Fail> {
+fn tool_eval(session: &mut dyn Backend, args: &Map<String, Value>) -> Result<String, Fail> {
     let code = strip_fences(req_str(args, "code")?);
     let want = want_flags(args)?;
     let outcome = session
@@ -212,7 +218,7 @@ fn tool_eval(session: &mut Session, args: &Map<String, Value>) -> Result<String,
     Ok(report(&outcome, want))
 }
 
-fn tool_bench(session: &mut Session, args: &Map<String, Value>) -> Result<String, Fail> {
+fn tool_bench(session: &mut dyn Backend, args: &Map<String, Value>) -> Result<String, Fail> {
     let code = strip_fences(req_str(args, "code")?);
     let want = want_flags(args)?;
     let iterations = opt_u64(args, "iterations", DEFAULT_ITERATIONS)?;
@@ -230,7 +236,7 @@ fn tool_bench(session: &mut Session, args: &Map<String, Value>) -> Result<String
     Ok(bench_report(&bench, want))
 }
 
-fn tool_alloc(session: &mut Session, args: &Map<String, Value>) -> Result<String, Fail> {
+fn tool_alloc(session: &mut dyn Backend, args: &Map<String, Value>) -> Result<String, Fail> {
     let name = req_str(args, "name")?.to_string();
     let has = |k: &str| args.get(k).is_some_and(|v| !v.is_null());
 
@@ -243,15 +249,16 @@ fn tool_alloc(session: &mut Session, args: &Map<String, Value>) -> Result<String
         let text = args["bytes"]
             .as_str()
             .ok_or_else(|| Fail::tool("\"bytes\" must be a string; it is stored as UTF-8"))?;
-        let addr = session
-            .declare_bytes(&name, text.as_bytes())
+        let infos = session
+            .alloc(&name, &Init::Text(text.to_string()))
             .map_err(session_error)?;
+        let addr = infos.first().map_or(0, |g| g.addr);
         return Ok(format!(
             "%{name}  u8[{len}]  addr {addr} ({addr:#x})\n\
              %{name}_len  i64[1]  holds {len}\n\
              preview: {preview}",
             len = text.len(),
-            preview = preview(session, &name),
+            preview = infos.first().map_or("", |g| g.preview.as_str()),
         ));
     }
 
@@ -291,25 +298,16 @@ fn tool_alloc(session: &mut Session, args: &Map<String, Value>) -> Result<String
         }
     };
 
-    // Encode before declaring: a bad value must not leave a half-made global
-    // behind, because the name could then never be declared again.
-    let words = values.map(|v| encode(v, ty)).transpose()?;
-    let addr = session
-        .declare_global(&name, ty, len)
-        .map_err(session_error)?;
-    if let Some(words) = words {
-        let global = session
-            .runtime_mut()
-            .globals
-            .get_mut(&name)
-            .ok_or_else(|| Fail::tool(format!("global %{name} disappeared after declaration")))?;
-        global.bytes_mut().copy_from_slice(&words);
-    }
+    let init = match values {
+        Some(v) => Init::Data { ty, bytes: encode(v, ty)? },
+        None => Init::Zeroed { ty, len },
+    };
+    let infos = session.alloc(&name, &init).map_err(session_error)?;
+    let (addr, preview) = infos.first().map_or((0, ""), |g| (g.addr, g.preview.as_str()));
     Ok(format!(
         "%{name}  {ty}[{len}]  addr {addr} ({addr:#x})  {bytes} bytes\npreview: {preview}",
         ty = ty.name(),
         bytes = ty.size() * len,
-        preview = preview(session, &name),
     ))
 }
 
@@ -338,15 +336,6 @@ fn encode(values: &[Value], ty: ElemType) -> Result<Vec<u8>, Fail> {
         }
     }
     Ok(out)
-}
-
-fn preview(session: &Session, name: &str) -> String {
-    session
-        .runtime()
-        .globals
-        .get(name)
-        .map(|g| g.preview(8))
-        .unwrap_or_default()
 }
 
 // ------------------------------------------------------------------ report
@@ -629,9 +618,10 @@ defined by an earlier clifpad_eval, and globals or buffers created with clifpad_
 {unsafe_note}
 - A global name binds once per session. The JIT caches its address the first time it resolves, so a \
 name cannot be re-typed or re-sized; clifpad_reset clears everything.
-- Nothing is sandboxed and nothing is bounds-checked. A wild address or a division by zero kills \
-this server process, and a loop that never terminates hangs it. Bound your loops and check your \
-addresses.
+- Nothing is bounds-checked, but your code runs in a worker process. A wild address, a division by \
+zero or a loop that runs past the timeout fails that one call with the cause and anything printed \
+before it, then the session is restored: functions and buffers come back, but buffers hold their \
+initial contents again.
 - Pass raw CLIF in `code`. The reference below is shared with a model-facing prompt, so it asks for \
 a fenced block; fences are optional here and are stripped if present.
 
@@ -644,8 +634,9 @@ CLIF reference
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::Session;
 
-    fn call(session: &mut Session, id: i64, method: &str, params: Value) -> Value {
+    fn call(session: &mut dyn Backend, id: i64, method: &str, params: Value) -> Value {
         let req = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         let line = handle_line(session, &req.to_string()).expect("a request gets a response");
         serde_json::from_str(&line).unwrap()

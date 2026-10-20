@@ -77,6 +77,25 @@ block3:
     return v3
 }"""
 
+# Divides by zero after printing, so the worker dies with SIGILL.
+TRAP = """function %main() -> i64 {
+    sig0 = (i64)
+    fn0 = %rt_print_i64 sig0
+block0:
+    v0 = iconst.i64 7
+    call fn0(v0)
+    v1 = iconst.i64 0
+    v2 = sdiv v0, v1
+    return v2
+}"""
+
+HANG = """function %main() -> i64 {
+block0:
+    jump block1
+block1:
+    jump block1
+}"""
+
 failures = []
 
 
@@ -90,7 +109,7 @@ def abbreviate(text, limit=400):
 class Server:
     def __init__(self, path):
         self.proc = subprocess.Popen(
-            [path, "--mcp"],
+            [path, "--mcp", "--timeout", "2"],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -171,7 +190,7 @@ def main():
     r = s.send("tools/list")
     names = [t["name"] for t in r["result"]["tools"]]
     print(f"    tools: {names}")
-    check("five scratch_* tools", names == [
+    check("five clifpad_* tools", names == [
         "clifpad_eval", "clifpad_bench", "clifpad_alloc", "clifpad_state", "clifpad_reset",
     ], str(names))
     desc = r["result"]["tools"][0]["description"]
@@ -202,6 +221,17 @@ def main():
     check("bench succeeds", r["result"]["isError"] is False, body)
     check("bench reports min/median/max", "min: " in body and "median: " in body and "max: " in body)
     check("bench value is 499500", "value: 499500" in body, body)
+
+    r = s.call("clifpad_eval", {"code": TRAP})
+    check("a trap is a tool error naming SIGILL", r["result"]["isError"] is True and "SIGILL" in text_of(r), text_of(r))
+    check("the trap report keeps what was printed", "Printed before that" in text_of(r) and "7" in text_of(r), text_of(r))
+    check("the trap report says the session was restored", "restored" in text_of(r), text_of(r))
+
+    r = s.call("clifpad_eval", {"code": HANG})
+    check("a hang times out as a tool error", r["result"]["isError"] is True and "Timed out" in text_of(r), text_of(r))
+
+    r = s.call("clifpad_eval", {"code": SUM_XS})
+    check("the session works after a crash and a hang", text_of(r).startswith("value: 6.0"), text_of(r))
 
     r = s.call("clifpad_state")
     check("state lists %xs", "%xs" in text_of(r), text_of(r))

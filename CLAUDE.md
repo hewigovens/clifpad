@@ -21,13 +21,13 @@ A native scratchpad: Cranelift IR (CLIF) text is JIT-compiled and run in-process
 - Markdown in this repo is not hard-wrapped. One paragraph per line.
 - Comments explain why, not what. Error messages are the model's only retry signal, so keep them precise and frontend-neutral.
 - Commits carry no attribution or co-author trailers.
-- Verify before claiming: `cargo test` (unit + `tests/e2e.rs`), `python3 scripts/mcp_smoke.py` for the MCP server, `prompts/experiment.py --dry-run` for the CLI contract. The 1M-element dot product in `tests/e2e.rs` must stay under 2 ms.
+- Verify before claiming: `cargo test` (unit + `tests/e2e.rs` + `tests/isolation.rs`), `python3 scripts/mcp_smoke.py` for the MCP server, `prompts/experiment.py --dry-run` for the CLI contract. The 1M-element dot product in `tests/e2e.rs` must stay under 2 ms.
 - The model experiment needs an OpenAI-compatible server: set `CLIFPAD_BASE_URL` and `CLIFPAD_MODEL` (no key needed for local servers) and run `python3 prompts/experiment.py`. Retries feed back only compiler and crash messages, never the expected answer.
 
 ## Status
 
-M1 core, M3 MCP server, and M4 natural-language layer are implemented. M2 was run once against a local Qwen. Remaining, in the order they matter:
+M1 core, M3 MCP server, M4 natural-language layer, and process isolation (DESIGN.md §8.1) are implemented. M2 was run once against a local Qwen. Both frontends run JIT code through `Supervisor` in a `clifpad --worker` process; `Session` stays in-process for embedders and `tests/e2e.rs`. Remaining, in the order they matter:
 
-1. Dogfood the MCP server from Claude Code (`claude mcp add clifpad -- target/release/clifpad --mcp`) and fix what an agent actually stumbles on.
-2. Process isolation with a timeout for every frontend, so a hang or trap does not kill the REPL or lose the session.
-3. Rerun `prompts/experiment.py` through the real CLI, and add a second model.
+1. Keep dogfooding the MCP server from a real Claude Code session (it is registered locally) and fix what an agent stumbles on. Known: optimized CLIF shows callees as `u0:4` instead of `%name`.
+2. Rerun `prompts/experiment.py` through the real CLI, and add a second model.
+3. Ctrl-C in the REPL that interrupts only the worker.

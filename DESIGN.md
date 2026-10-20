@@ -39,7 +39,7 @@ What it costs: CLIF is verbose SSA with explicit blocks and no bounds checking. 
 ### 1.3 Non-goals
 
 - Not a scripting language. No strings, maps, closures, or I/O beyond `print`.
-- Not a sandbox. CLIF has raw loads and stores. A bad address segfaults the process. See §8.
+- Not a sandbox. CLIF has raw loads and stores. A bad address segfaults the worker process that runs the code. See §8.
 - Not a Rust or C compiler.
 
 ## 2. Architecture
@@ -329,7 +329,7 @@ sequenceDiagram
 
 **Timeout.** The supervisor reads responses on a thread and waits with a deadline, default 10 s, set with `--timeout SECS` or `CLIFPAD_TIMEOUT`. On expiry it kills the worker with `SIGKILL`, then respawns and replays as for a crash. The deadline covers a whole call, so `bench` with many iterations of a slow `%main` hits it too, and that message names the iteration count. A watchdog thread in the worker exits the process when its parent dies, so a hung worker never outlives the CLI or MCP server.
 
-**Prints.** `%rt_print_*` currently buffer into `Runtime::prints` and are lost with the process. In the worker, each print is also written to stdout as a `{"print": ...}` line the moment it happens, so the supervisor can report what a program printed before it crashed. That is often the best retry signal a model gets.
+**Prints.** `%rt_print_*` buffer into `Runtime::prints`, which die with the process. In the worker, each print is also written to stdout as a `{"print": ...}` line the moment it happens, so the supervisor can report what a program printed before it crashed. That is often the best retry signal a model gets.
 
 **Crash messages.** Decoded from the worker's exit status. Verified on aarch64 macOS by running each case through the current MCP server:
 
@@ -342,9 +342,9 @@ sequenceDiagram
 
 Each message ends with what was printed before the crash and the restore note, so the model can fix the program and call again without knowing anything about processes.
 
-**Cost.** One pipe round trip per call, expected in the tens of microseconds against compile times of 30 to 900 µs. Run and compile times are still measured inside the worker, so reported numbers do not change. To be measured when built, and recorded in §11.
+**Cost.** Measured through the MCP server: a full tool call adds a median 31 µs (p90 36 µs) on top of the compile and run time the worker reports, and that includes the MCP layer and the Python client. A crash plus respawn plus replay of 20 definitions takes 3.4 ms. Run and compile times are measured inside the worker, so reported numbers do not change.
 
-**Not in this step.** Ctrl-C in the REPL still kills the REPL and its worker together, as it does today; interrupting only the worker needs a SIGINT handler in the parent and is a follow-up. The signal-handler alternative in §12.4 stays deferred.
+**Not done.** Ctrl-C in the REPL still kills the REPL and its worker together; interrupting only the worker needs a SIGINT handler in the parent and is a follow-up. The signal-handler alternative in §12.4 stays deferred.
 
 ## 9. Milestones
 
@@ -358,7 +358,7 @@ Each milestone is shippable on its own and has a test that proves it.
 
 **M4 — NL layer in the CLI.** Done in code: `src/nl.rs` and the REPL in `src/main.rs` implement the prompt, six-message history, and the retry loop with a temperature ramp; `:save` / `:load` exist. Verified against stub servers for prompt shape, retries, exhaustion, and network failure. Not yet verified against the real local model from the CLI, because the model server was unreachable when the frontends were merged; `prompts/experiment.py` now drives the real binary and is the way to do that.
 
-**M5 — polish.** Remaining: process isolation with a timeout for both frontends, designed in §8.1. Done already: `dlsym` behind `--allow-unsafe`, resource caps, README rewrite, crate rename to clifpad.
+**M5 — polish.** Process isolation with a timeout for both frontends is done (§8.1, `src/worker.rs`, `tests/isolation.rs`, and crash and hang checks in `scripts/mcp_smoke.py`). Remaining: Ctrl-C that interrupts only the worker. Done already: `dlsym` behind `--allow-unsafe`, resource caps, README rewrite, crate rename to clifpad.
 
 ## 10. Crate layout after M1
 
@@ -368,11 +368,12 @@ src/
   session.rs    eval loop, symbol table, timing, bench, Outcome
   runtime.rs    globals, buffers, host ABI (extern "C" fns), CURRENT_RUNTIME
   nl.rs         model client and prompt (CLI only)
-  mcp.rs        stdio JSON-RPC server
+  mcp.rs        stdio JSON-RPC server, over any `Backend`
   worker.rs     Supervisor and the --worker loop (§8.1)
   main.rs       CLI: REPL, --eval, --mcp
 tests/
   e2e.rs        per-milestone acceptance tests
+  isolation.rs  crash, hang, replay and timeout through a real worker
 scripts/
   mcp_smoke.py  end-to-end check of the MCP server over stdio
 prompts/
@@ -402,6 +403,8 @@ A throwaway spike (cranelift 0.135, Apple M-series, debug build of the harness, 
 | `--allow-unsafe` gate | Without it, `%strlen` is rejected by the pre-check. With it, `dlsym` resolves it and returns 5 for `"hello"`. |
 | Verifier error quality | `pretty_verifier_error` gives the instruction, a caret, and "mismatched argument count for jump block1: got 0, expected 1". Parse errors carry a line number. |
 | `trapz` kills the process | Yes, exit status 132 (`SIGILL`). |
+| Crash signals on aarch64 macOS | `sdiv` / `srem` by zero, INT_MIN / -1, `fcvt_to_sint` of NaN and `trap` all give `SIGILL`; a load from address 8 or an unmapped high address gives `SIGSEGV`; unbounded recursion gives `SIGABRT` with Rust's "has overflowed its stack" on stderr. |
+| Worker overhead | 31 µs median per MCP tool call over in-process; respawn and replay of 20 definitions 3.4 ms; a worker stuck in a loop exits within 250 ms of its parent being `SIGKILL`ed. |
 | Decimal float literals | Rejected by the reader ("Float must be hexadecimal"). A line-level rewrite to `Ieee64::with_float(v).to_string()` fixes it. `1e3` also works after the rewrite. |
 
 ### 11.1 Model experiment (M2, first pass)

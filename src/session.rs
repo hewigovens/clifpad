@@ -13,15 +13,46 @@ use cranelift::codegen::{self, settings};
 use cranelift::prelude::{Configurable, Signature};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataId, FuncId, Linkage, Module, default_libcall_names};
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::{ElemType, HostFn, Runtime, host_table};
 
 /// Result of `%main`, typed by its signature.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(into = "ScalarWire", from = "ScalarWire")]
 pub enum Scalar {
     I64(i64),
     F64(f64),
     Unit,
+}
+
+/// JSON has no NaN or infinities, so floats cross the worker pipe as bits.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ScalarWire {
+    I64(i64),
+    F64Bits(u64),
+    Unit,
+}
+
+impl From<Scalar> for ScalarWire {
+    fn from(s: Scalar) -> Self {
+        match s {
+            Scalar::I64(v) => ScalarWire::I64(v),
+            Scalar::F64(v) => ScalarWire::F64Bits(v.to_bits()),
+            Scalar::Unit => ScalarWire::Unit,
+        }
+    }
+}
+
+impl From<ScalarWire> for Scalar {
+    fn from(s: ScalarWire) -> Self {
+        match s {
+            ScalarWire::I64(v) => Scalar::I64(v),
+            ScalarWire::F64Bits(b) => Scalar::F64(f64::from_bits(b)),
+            ScalarWire::Unit => Scalar::Unit,
+        }
+    }
 }
 
 impl fmt::Display for Scalar {
@@ -41,7 +72,7 @@ pub struct EvalOptions {
 }
 
 /// What one evaluation produced. See DESIGN.md §2.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Outcome {
     /// `None` when the text defined functions but had no `%main`.
     pub value: Option<Scalar>,
@@ -56,7 +87,7 @@ pub struct Outcome {
     pub defined: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BenchResult {
     pub iterations: usize,
     pub min_ns: u64,
@@ -69,13 +100,13 @@ pub struct BenchResult {
     pub outcome: Outcome,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FunctionInfo {
     pub name: String,
     pub signature: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GlobalInfo {
     pub name: String,
     pub ty: ElemType,
@@ -84,7 +115,7 @@ pub struct GlobalInfo {
     pub preview: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StateReport {
     pub functions: Vec<FunctionInfo>,
     pub globals: Vec<GlobalInfo>,
@@ -117,6 +148,62 @@ impl fmt::Display for StateReport {
             }
         }
         Ok(())
+    }
+}
+
+/// How `alloc` initializes a new global.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Init {
+    /// `len` zeroed elements.
+    Zeroed { ty: ElemType, len: usize },
+    /// Native-endian element bytes; the length is implied.
+    Data { ty: ElemType, bytes: Vec<u8> },
+    /// UTF-8 text as a `u8` buffer plus an `i64` slot `<name>_len`.
+    Text(String),
+}
+
+/// What every frontend needs from a session, whether it runs JIT code in this
+/// process (`Session`) or in a worker that may crash (`Supervisor`).
+pub trait Backend {
+    fn eval(&mut self, text: &str, opts: &EvalOptions) -> Result<Outcome>;
+    fn bench(&mut self, text: &str, iterations: usize, opts: &EvalOptions) -> Result<BenchResult>;
+    /// Create a global and return it plus any companion it got (`<name>_len`).
+    fn alloc(&mut self, name: &str, init: &Init) -> Result<Vec<GlobalInfo>>;
+    fn state(&mut self) -> Result<StateReport>;
+    fn reset(&mut self) -> Result<()>;
+    /// Source text of every evaluation that defined a persisted function, in order.
+    fn definitions(&self) -> Vec<String>;
+    fn allow_unsafe(&self) -> bool;
+}
+
+impl Backend for Session {
+    fn eval(&mut self, text: &str, opts: &EvalOptions) -> Result<Outcome> {
+        Session::eval(self, text, opts)
+    }
+
+    fn bench(&mut self, text: &str, iterations: usize, opts: &EvalOptions) -> Result<BenchResult> {
+        Session::bench(self, text, iterations, opts)
+    }
+
+    fn alloc(&mut self, name: &str, init: &Init) -> Result<Vec<GlobalInfo>> {
+        Session::alloc(self, name, init)
+    }
+
+    fn state(&mut self) -> Result<StateReport> {
+        Ok(Session::state(self))
+    }
+
+    fn reset(&mut self) -> Result<()> {
+        Session::reset(self)
+    }
+
+    fn definitions(&self) -> Vec<String> {
+        Session::definitions(self).to_vec()
+    }
+
+    fn allow_unsafe(&self) -> bool {
+        Session::allow_unsafe(self)
     }
 }
 
@@ -275,6 +362,51 @@ impl Session {
         Ok(addr)
     }
 
+    /// Create a global as `init` describes. Validation happens before anything
+    /// is declared, so a rejected call leaves no half-made global behind.
+    pub fn alloc(&mut self, name: &str, init: &Init) -> Result<Vec<GlobalInfo>> {
+        let names = match init {
+            Init::Zeroed { ty, len } => {
+                self.declare_global(name, *ty, *len)?;
+                vec![name.to_string()]
+            }
+            Init::Data { ty, bytes } => {
+                if bytes.len() % ty.size() != 0 {
+                    bail!(
+                        "{} bytes is not a whole number of {} elements",
+                        bytes.len(),
+                        ty.name()
+                    );
+                }
+                self.declare_global(name, *ty, bytes.len() / ty.size())?;
+                let g = self.runtime.globals.get_mut(name).expect("declared above");
+                g.bytes_mut().copy_from_slice(bytes);
+                vec![name.to_string()]
+            }
+            Init::Text(text) => {
+                self.declare_bytes(name, text.as_bytes())?;
+                vec![name.to_string(), format!("{name}_len")]
+            }
+        };
+        Ok(names.iter().filter_map(|n| self.global_info(n)).collect())
+    }
+
+    pub fn global_info(&self, name: &str) -> Option<GlobalInfo> {
+        self.runtime.globals.get(name).map(|g| GlobalInfo {
+            name: name.to_string(),
+            ty: g.ty,
+            len: g.len,
+            addr: g.addr(),
+            preview: g.preview(8),
+        })
+    }
+
+    /// Compile and persist the functions in `text` without running `%main`.
+    /// Used to replay a session into a fresh worker.
+    pub fn define(&mut self, text: &str) -> Result<()> {
+        self.compile(text, &EvalOptions::default()).map(|_| ())
+    }
+
     pub fn state(&self) -> StateReport {
         let mut functions: Vec<FunctionInfo> = self
             .fns
@@ -288,14 +420,8 @@ impl Session {
         let globals = self
             .runtime
             .globals
-            .iter()
-            .map(|(name, g)| GlobalInfo {
-                name: name.clone(),
-                ty: g.ty,
-                len: g.len,
-                addr: g.addr(),
-                preview: g.preview(8),
-            })
+            .keys()
+            .filter_map(|name| self.global_info(name))
             .collect();
         StateReport {
             functions,

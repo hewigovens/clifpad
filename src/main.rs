@@ -6,9 +6,11 @@ mod nl;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clifpad::{ElemType, EvalOptions, Outcome, Session};
+use clifpad::worker::DEFAULT_TIMEOUT;
+use clifpad::{Backend, ElemType, EvalOptions, Init, Outcome, Supervisor};
 
 const USAGE: &str = "\
 clifpad — a native scratchpad: CLIF text in, machine behaviour out.
@@ -24,13 +26,15 @@ options:
   --asm            include native disassembly in every result
   --offline        never call the model; plain CLIF REPL
   --mcp            run the MCP server and exit
+  --timeout SECS   kill a run that takes longer (default 10)
   --help           show this message
 
 environment (also read from .env):
   CLIFPAD_BASE_URL / OPENAI_BASE_URL   default http://127.0.0.1:11434/v1
   CLIFPAD_MODEL    / OPENAI_MODEL      default qwen3
   CLIFPAD_API_KEY  / OPENAI_API_KEY    optional
-  CLIFPAD_OFFLINE=1                    same as --offline";
+  CLIFPAD_OFFLINE=1                    same as --offline
+  CLIFPAD_TIMEOUT=SECS                 same as --timeout";
 
 const HELP: &str = "\
 input:
@@ -66,6 +70,9 @@ struct Args {
     asm: bool,
     offline: bool,
     mcp: bool,
+    /// Internal: serve one session over stdin/stdout for a `Supervisor`.
+    worker: bool,
+    timeout: Option<Duration>,
     help: bool,
 }
 
@@ -82,6 +89,11 @@ fn parse_args(argv: &[String]) -> Result<Args> {
             "--asm" => args.asm = true,
             "--offline" => args.offline = true,
             "--mcp" => args.mcp = true,
+            "--worker" => args.worker = true,
+            "--timeout" => {
+                let v = it.next().context("--timeout needs SECS")?;
+                args.timeout = Some(parse_timeout(v)?);
+            }
             "--help" | "-h" => args.help = true,
             other => bail!("unknown argument {other:?}; try --help"),
         }
@@ -105,8 +117,8 @@ fn main() -> ExitCode {
         println!("{HELP}");
         return ExitCode::SUCCESS;
     }
-    if args.mcp {
-        return match clifpad::mcp::serve(args.allow_unsafe) {
+    if args.worker {
+        return match clifpad::worker::serve(args.allow_unsafe) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -114,7 +126,23 @@ fn main() -> ExitCode {
             }
         };
     }
-    let mut repl = match Repl::new(&args) {
+    let timeout = match args.timeout.map(Ok).or_else(timeout_from_env).transpose() {
+        Ok(t) => t.unwrap_or(DEFAULT_TIMEOUT),
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            return ExitCode::from(2);
+        }
+    };
+    if args.mcp {
+        return match clifpad::mcp::serve(args.allow_unsafe, timeout) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    let mut repl = match Repl::new(&args, timeout) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("error: {e:#}");
@@ -127,9 +155,27 @@ fn main() -> ExitCode {
     }
 }
 
-/// Line-driven input router (DESIGN.md §3) over one `Session`.
+fn parse_timeout(text: &str) -> Result<Duration> {
+    let secs: f64 = text
+        .trim()
+        .parse()
+        .with_context(|| format!("bad timeout {text:?}: expected seconds"))?;
+    if !(secs > 0.0 && secs.is_finite()) {
+        bail!("bad timeout {text:?}: expected a positive number of seconds");
+    }
+    Ok(Duration::from_secs_f64(secs))
+}
+
+fn timeout_from_env() -> Option<Result<Duration>> {
+    let _ = dotenvy::dotenv();
+    let v = std::env::var("CLIFPAD_TIMEOUT").ok()?;
+    Some(parse_timeout(&v).context("CLIFPAD_TIMEOUT"))
+}
+
+/// Line-driven input router (DESIGN.md §3) over one session, whose JIT code
+/// runs in a worker process (DESIGN.md §8.1).
 struct Repl {
-    session: Session,
+    session: Supervisor,
     model: nl::Client,
     asm: bool,
     /// Source text of the last successful evaluation, for `:bench`.
@@ -151,9 +197,9 @@ enum Flow {
 }
 
 impl Repl {
-    fn new(args: &Args) -> Result<Self> {
+    fn new(args: &Args, timeout: Duration) -> Result<Self> {
         Ok(Self {
-            session: Session::new(args.allow_unsafe)?,
+            session: Supervisor::from_current_exe(args.allow_unsafe, timeout)?,
             model: nl::Client::from_env(args.offline),
             asm: args.asm,
             last_text: None,
@@ -335,7 +381,7 @@ impl Repl {
             ":help" | ":h" | ":?" => println!("{HELP}"),
             ":quit" | ":q" | ":exit" => return Ok(Flow::Quit),
             ":state" => {
-                let s = self.session.state().to_string();
+                let s = self.session.state()?.to_string();
                 println!("{}", s.trim_end());
             }
             ":reset" => {
@@ -379,11 +425,12 @@ impl Repl {
         let ty = ElemType::parse(ty_str.trim())
             .with_context(|| format!("unknown type {ty_str:?}: use i64, f64 or u8"))?;
         let value = parts.next().map(str::trim).filter(|s| !s.is_empty());
-        self.session.declare_global(name, ty, 1)?;
-        if let Some(v) = value {
-            self.write_elems(name, ty, std::slice::from_ref(&v))?;
-        }
-        self.report_symbol(name);
+        let init = match value {
+            Some(v) => Init::Data { ty, bytes: encode_elems(ty, std::slice::from_ref(&v))? },
+            None => Init::Zeroed { ty, len: 1 },
+        };
+        let infos = self.session.alloc(name, &init)?;
+        report_symbols(&infos);
         Ok(())
     }
 
@@ -402,9 +449,8 @@ impl Repl {
                 bail!("a quoted initialiser needs type u8");
             }
             let text = unquote(spec)?;
-            self.session.declare_bytes(name, text.as_bytes())?;
-            self.report_symbol(name);
-            self.report_symbol(&format!("{name}_len"));
+            let infos = self.session.alloc(name, &Init::Text(text))?;
+            report_symbols(&infos);
             return Ok(());
         }
 
@@ -414,8 +460,8 @@ impl Repl {
             if values.is_empty() {
                 bail!("{usage}");
             }
-            self.session.declare_global(name, ty, values.len())?;
-            self.write_elems(name, ty, &values)?;
+            let bytes = encode_elems(ty, &values)?;
+            report_symbols(&self.session.alloc(name, &Init::Data { ty, bytes })?);
         } else {
             let len: usize = spec
                 .replace('_', "")
@@ -424,9 +470,8 @@ impl Repl {
             if len == 0 {
                 bail!("a buffer needs at least one element");
             }
-            self.session.declare_global(name, ty, len)?;
+            report_symbols(&self.session.alloc(name, &Init::Zeroed { ty, len })?);
         }
-        self.report_symbol(name);
         Ok(())
     }
 
@@ -502,41 +547,6 @@ impl Repl {
         Ok(flow)
     }
 
-    fn write_elems(&mut self, name: &str, ty: ElemType, values: &[&str]) -> Result<()> {
-        let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(values.len());
-        for v in values {
-            encoded.push(encode_elem(ty, v)?);
-        }
-        let g = self
-            .session
-            .runtime_mut()
-            .globals
-            .get_mut(name)
-            .with_context(|| format!("%{name} disappeared"))?;
-        let bytes = g.bytes_mut();
-        for (i, e) in encoded.iter().enumerate() {
-            let at = i * ty.size();
-            if at + e.len() > bytes.len() {
-                bail!("%{name} holds {} elements, got {}", bytes.len() / ty.size(), encoded.len());
-            }
-            bytes[at..at + e.len()].copy_from_slice(e);
-        }
-        Ok(())
-    }
-
-    fn report_symbol(&self, name: &str) {
-        if let Some(g) = self.session.runtime().globals.get(name) {
-            println!(
-                "; %{} {}[{}] @ {:#x}  {}",
-                name,
-                g.ty.name(),
-                g.len,
-                g.addr(),
-                g.preview(8)
-            );
-        }
-    }
-
     // ---- natural language ----------------------------------------------
 
     fn ask_model(&mut self, input: &str) -> Result<()> {
@@ -546,7 +556,7 @@ impl Repl {
                  a `:` command, or enable the model with :online"
             );
         }
-        let state = self.session.state().to_string();
+        let state = self.session.state()?.to_string();
         let mut msgs = vec![nl::Msg::system(self.model.system_prompt(&state))];
         msgs.extend(self.history.iter().cloned());
         msgs.push(nl::Msg::user(input.to_string()));
@@ -640,6 +650,20 @@ fn brace_counts(line: &str) -> (i32, i32) {
     let open = code.matches('{').count() as i32;
     let close = code.matches('}').count() as i32;
     (open, close)
+}
+
+fn report_symbols(infos: &[clifpad::GlobalInfo]) {
+    for g in infos {
+        println!("; %{} {}[{}] @ {:#x}  {}", g.name, g.ty.name(), g.len, g.addr, g.preview);
+    }
+}
+
+fn encode_elems(ty: ElemType, values: &[&str]) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(values.len() * ty.size());
+    for v in values {
+        bytes.extend(encode_elem(ty, v)?);
+    }
+    Ok(bytes)
 }
 
 fn encode_elem(ty: ElemType, text: &str) -> Result<Vec<u8>> {
