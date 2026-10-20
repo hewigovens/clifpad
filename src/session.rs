@@ -718,8 +718,10 @@ impl Imports {
         for line in asm.lines().filter(|l| !l.trim_start().starts_with("unwind ")) {
             let mut line = line.to_string();
             for (_, r, name) in &self.names {
+                // aarch64 prints `User(userextnameN)+0`, x86-64 a bare `userextnameN+0`.
                 let user = format!("User({r})");
                 line = line.replace(&format!("{user}+0"), name).replace(&user, name);
+                line = replace_token(&replace_token(&line, &format!("{r}+0"), name), r, name);
             }
             out.push_str(&line);
             out.push('\n');
