@@ -493,10 +493,10 @@ fn global_redeclare_rules() {
 
     let ty_err = s.declare_global("xs", ElemType::I64, 8).unwrap_err().to_string();
     assert!(ty_err.contains("xs"), "{ty_err}");
-    assert!(ty_err.contains(":reset"), "error should point at :reset: {ty_err}");
+    assert!(ty_err.contains("reset the session"), "error should point at a reset: {ty_err}");
 
     let len_err = s.declare_global("xs", ElemType::F64, 16).unwrap_err().to_string();
-    assert!(len_err.contains(":reset"), "error should point at :reset: {len_err}");
+    assert!(len_err.contains("reset the session"), "error should point at a reset: {len_err}");
 }
 
 // ----------------------------------------------- 7. M1 performance bar (§9)

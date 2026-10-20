@@ -308,13 +308,13 @@ Each milestone is shippable on its own and has a test that proves it.
 
 **M1 — CLIF session.** Done. `src/session.rs` and `src/runtime.rs` implement §4 and §5; `tests/e2e.rs` holds 20 acceptance tests including the 1M-element dot product (measured 0.8 to 0.95 ms, bar is 2 ms), verifier error text, persistence, redefinition, the dlsym gate, allocation limits, and reset.
 
-**M2 — model experiment.** Done for Qwen3.8-Flash, see §11.1: 19 of 22 tasks correct on the first try, 20 of 22 within two retries. The task set in `prompts/tasks.json` is the regression suite for the prompt; rerun it whenever the cheat sheet or the host ABI changes, and against Deepseek when available. Remaining M2 work: wire `prompts/experiment.py` to the real binary once M1 lands.
+**M2 — model experiment.** Done for Qwen3.8-Flash, see §11.1: 19 of 22 tasks correct on the first try, 20 of 22 within two retries. The task set in `prompts/tasks.json` is the regression suite for the prompt; rerun it whenever the cheat sheet or the host ABI changes, and against Deepseek when available. `prompts/experiment.py` now drives the real binary; remaining M2 work is to rerun it that way and add a second model.
 
 **M3 — MCP server.** Done. `src/mcp.rs` serves the five tools over newline-delimited JSON-RPC; `scripts/mcp_smoke.py` exercises the handshake, every tool, the verifier error path, and clean EOF exit. The Claude Code acceptance check (answering the shift question through `clifpad_eval`) is still to be run by hand: `claude mcp add clifpad -- target/release/clifpad --mcp`.
 
 **M4 — NL layer in the CLI.** Done in code: `src/nl.rs` and the REPL in `src/main.rs` implement the prompt, six-message history, and the retry loop with a temperature ramp; `:save` / `:load` exist. Verified against stub servers for prompt shape, retries, exhaustion, and network failure. Not yet verified against the real local model from the CLI, because the model server was unreachable when the frontends were merged; `prompts/experiment.py` now drives the real binary and is the way to do that.
 
-**M5 — polish.** Remaining: a hang timeout in the CLI (§8 requires it in every frontend; today only MCP has process isolation, via the host), a signal handler or forked worker so a trap does not kill the REPL, crate rename. Done already: `dlsym` behind `--allow-unsafe`, resource caps, README rewrite.
+**M5 — polish.** Remaining: a hang timeout in the CLI (§8 requires it in every frontend; today only MCP has process isolation, via the host), a signal handler or forked worker so a trap does not kill the REPL. Done already: `dlsym` behind `--allow-unsafe`, resource caps, README rewrite, crate rename to clifpad.
 
 ## 10. Crate layout after M1
 

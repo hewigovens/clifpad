@@ -2,7 +2,7 @@
 """Smoke test for the clifpad MCP server (DESIGN.md §7).
 
 Spawns `target/debug/clifpad --mcp`, speaks newline-delimited JSON-RPC 2.0
-over its stdin/stdout, and checks the five scratch_* tools plus the protocol
+over its stdin/stdout, and checks the five clifpad_* tools plus the protocol
 handshake. Prints an abbreviated transcript; exits non-zero on the first
 failure.
 

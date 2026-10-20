@@ -162,7 +162,7 @@ impl Runtime {
                 return Ok(g.addr());
             }
             bail!(
-                "global %{name} already exists as {}[{}]; names bind once per session, use :reset",
+                "global %{name} already exists as {}[{}]; names bind once per session; reset the session to rebind it",
                 g.ty.name(),
                 g.len
             );
@@ -185,7 +185,7 @@ impl Runtime {
             if g.ty == ElemType::U8 && g.len == data.len() && g.bytes() == data {
                 return Ok(g.addr());
             }
-            bail!("global %{name} already exists; names bind once per session, use :reset");
+            bail!("global %{name} already exists; names bind once per session; reset the session to rebind it");
         }
         let addr = self.declare(name, ElemType::U8, data.len())?;
         self.globals.get_mut(name).unwrap().bytes_mut().copy_from_slice(data);

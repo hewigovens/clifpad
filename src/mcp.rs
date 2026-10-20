@@ -189,7 +189,7 @@ fn run_tool(session: &mut Session, params: &Value) -> Result<String, Fail> {
             Ok("ok".to_string())
         }
         other => Err(Fail::invalid_params(format!(
-            "unknown tool {other:?}; call tools/list for the five scratch_* tools"
+            "unknown tool {other:?}; call tools/list for the five clifpad_* tools"
         ))),
     }
 }
@@ -291,11 +291,13 @@ fn tool_alloc(session: &mut Session, args: &Map<String, Value>) -> Result<String
         }
     };
 
+    // Encode before declaring: a bad value must not leave a half-made global
+    // behind, because the name could then never be declared again.
+    let words = values.map(|v| encode(v, ty)).transpose()?;
     let addr = session
         .declare_global(&name, ty, len)
         .map_err(session_error)?;
-    if let Some(values) = values {
-        let words = encode(values, ty)?;
+    if let Some(words) = words {
         let global = session
             .runtime_mut()
             .globals
@@ -374,7 +376,8 @@ fn report(o: &Outcome, want: Want) -> String {
     s.push_str(&format!(
         "compile: {} run: {} code: {} bytes\n",
         micros(o.compile_ns),
-        micros(o.run_ns),
+        // Nothing ran when the call only defined functions.
+        if o.value.is_some() { micros(o.run_ns) } else { "-".to_string() },
         o.code_bytes
     ));
     if want.clif {
@@ -392,8 +395,9 @@ fn report(o: &Outcome, want: Want) -> String {
 
 fn bench_report(b: &BenchResult, want: Want) -> String {
     format!(
-        "iterations: {}\nmin: {} ns  median: {} ns  max: {} ns\n{}",
+        "iterations: {}\nmean: {:.1} ns  min: {} ns  median: {} ns  max: {} ns\n{}",
         b.iterations,
+        b.mean_ns,
         b.min_ns,
         b.median_ns,
         b.max_ns,
@@ -774,6 +778,18 @@ mod tests {
     }
 
     #[test]
+    fn rejected_alloc_leaves_the_name_free() {
+        let mut s = Session::new(false).unwrap();
+        let alloc = |values: Value| {
+            json!({ "name": "clifpad_alloc", "arguments": { "name": "xs", "type": "i64", "values": values } })
+        };
+        let r = call(&mut s, 1, "tools/call", alloc(json!([1, 2, 3.5])));
+        assert_eq!(r["result"]["isError"], true);
+        let r = call(&mut s, 2, "tools/call", alloc(json!([1, 2, 3])));
+        assert_eq!(r["result"]["isError"], false, "{}", tool_text(&r));
+    }
+
+    #[test]
     fn bench_reports_three_numbers() {
         let mut s = Session::new(false).unwrap();
         let code = "function %main() -> i64 {\nblock0:\nv0 = iconst.i64 6\nv1 = iconst.i64 7\nv2 = imul v0, v1\nreturn v2\n}";
@@ -784,7 +800,8 @@ mod tests {
             json!({ "name": "clifpad_bench", "arguments": { "code": code, "iterations": 50 } }),
         );
         let text = tool_text(&r);
-        assert!(text.starts_with("iterations: 50\nmin: "), "{text}");
+        assert!(text.starts_with("iterations: 50\nmean: "), "{text}");
+        assert!(text.contains(" min: ") && text.contains(" median: "), "{text}");
         assert!(text.contains("value: 42\n"), "{text}");
 
         let r = call(

@@ -62,6 +62,10 @@ pub struct BenchResult {
     pub min_ns: u64,
     pub median_ns: u64,
     pub max_ns: u64,
+    /// Per-call samples are quantized to the clock tick (about 42 ns on Apple
+    /// silicon), so min and median read 0 for short functions; the mean over
+    /// many calls stays meaningful.
+    pub mean_ns: f64,
     pub outcome: Outcome,
 }
 
@@ -222,6 +226,7 @@ impl Session {
             times.push(ns);
             last = Some((v, p));
         }
+        let mean_ns = times.iter().sum::<u64>() as f64 / iterations as f64;
         times.sort_unstable();
         let (value, prints) = last.unwrap();
         Ok(BenchResult {
@@ -229,6 +234,7 @@ impl Session {
             min_ns: times[0],
             median_ns: times[times.len() / 2],
             max_ns: times[times.len() - 1],
+            mean_ns,
             outcome: Outcome {
                 value: Some(value),
                 prints,
@@ -322,8 +328,8 @@ impl Session {
     fn compile(&mut self, text: &str, opts: &EvalOptions) -> Result<Compiled> {
         let t0 = Instant::now();
         let text = hexify_floats(text);
-        let mut funcs =
-            cranelift_reader::parse_functions(&text).map_err(|e| anyhow!("parse error: {e}"))?;
+        let mut funcs = cranelift_reader::parse_functions(&text)
+            .map_err(|e| anyhow!("parse error: {e}{}", parse_hint(&e.to_string())))?;
         if funcs.is_empty() {
             bail!("no functions found; expected `function %main() -> i64 {{ ... }}`");
         }
@@ -355,7 +361,11 @@ impl Session {
                     && r.value_type != ir::types::I64
                     && r.value_type != ir::types::F64
                 {
-                    bail!("%main must return i64, f64 or nothing, not {}", r.value_type);
+                    bail!(
+                        "%main must return i64, f64 or nothing, not {}; widen it first \
+                         (sextend.i64 / uextend.i64 for integers, fpromote.f64 for f32)",
+                        r.value_type
+                    );
                 }
                 entry = Some((id, f.signature.clone()));
             } else {
@@ -590,6 +600,16 @@ pub fn display_signature(sig: &Signature) -> String {
     s
 }
 
+/// A retry hint for parse errors models hit repeatedly.
+fn parse_hint(message: &str) -> &'static str {
+    if message.contains("Unknown opcode") && message.contains("_imm'") {
+        "; immediate forms do not exist in this Cranelift version, put the constant in a \
+         value with iconst and use the plain instruction"
+    } else {
+        ""
+    }
+}
+
 /// cranelift-reader accepts only hexadecimal float literals. Rewrite decimal
 /// literals after `f64const` / `f32const` so a model can write `0.1`.
 pub fn hexify_floats(text: &str) -> String {
@@ -616,6 +636,12 @@ fn hexify_line(line: &str) -> String {
         let is_decimal = lit
             .chars()
             .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'e' | 'E' | '+' | '-'));
+        if is_hex && !lit.contains('.') {
+            // The reader rejects a hex float with no fraction digits.
+            if let Some(p) = lit.find(['p', 'P']) {
+                return format!("{head}{}{}.0{}{tail}", &rest[..lead], &lit[..p], &lit[p..]);
+            }
+        }
         if is_hex || lit.is_empty() || !is_decimal {
             return line.to_string();
         }
@@ -646,5 +672,10 @@ mod tests {
         );
         assert_eq!(hexify_line("    v0 = f64const 1e3"), "    v0 = f64const 0x1.f400000000000p9");
         assert_eq!(hexify_line("block0:"), "block0:");
+        assert_eq!(hexify_line("    v0 = f64const 0x1p0"), "    v0 = f64const 0x1.0p0");
+        assert_eq!(
+            hexify_line("    v0 = f64const -0x1P-3 ; x"),
+            "    v0 = f64const -0x1.0P-3 ; x"
+        );
     }
 }

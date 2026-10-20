@@ -442,8 +442,9 @@ impl Repl {
         let text = self.last_text.clone().context("nothing evaluated yet")?;
         let result = self.session.bench(&text, n, &EvalOptions { asm: self.asm })?;
         let line = format!(
-            "; bench {} · min {:.3} µs · median {:.3} µs · max {:.3} µs",
+            "; bench {} · mean {:.3} µs · min {:.3} µs · median {:.3} µs · max {:.3} µs",
             result.iterations,
+            result.mean_ns / 1000.0,
             result.min_ns as f64 / 1000.0,
             result.median_ns as f64 / 1000.0,
             result.max_ns as f64 / 1000.0
