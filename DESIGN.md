@@ -295,12 +295,56 @@ The tool description carries the §4 conventions and the cheat sheet from §6 so
 
 ## 8. Safety model
 
-- **Memory.** CLIF has raw loads and stores. A wild address segfaults the process. There is no bounds checking and no attempt at one. The MCP server is one process per session, so a crash or hang kills only that server, and the host's tool timeout reports it. The CLI documents this and offers `:save` / `:load` of the session's function text so a crash is recoverable.
-- **Traps.** `trapz`, `trapnz`, and trapping division raise `SIGILL` or `SIGFPE`. Same consequence as a segfault. A signal handler that converts these into an `Outcome` error is possible but not in scope until someone needs it.
+- **Memory.** CLIF has raw loads and stores. A wild address segfaults the process. There is no bounds checking and no attempt at one. JIT code therefore runs in a worker process (§8.1), so a crash costs one call, not the session.
+- **Traps.** `trapz`, `trapnz`, trapping division and trapping float conversion raise `SIGILL` on aarch64 (verified, §8.1). Same consequence as a segfault, same mitigation.
 - **FFI.** Resolving arbitrary process symbols via `dlsym` is gated by `--allow-unsafe`. Without the flag, only `%rt_*` and session functions resolve.
-- **Hangs.** JIT code cannot be preempted safely. Same mitigation as crashes: process isolation, plus a timeout. One of 22 model-written programs in §11.1 looped forever, so this is required in every frontend, not only MCP.
+- **Hangs.** JIT code cannot be preempted safely. Same mitigation as crashes: the worker is killed after a timeout. One of 22 model-written programs in §11.1 looped forever, so this is required in every frontend, not only MCP.
 - **Crash messages.** The exit signal is diagnostic and is reported as such: `SIGILL` is a Cranelift trap (division by zero or explicit trap), `SIGSEGV` / `SIGBUS` is a bad address, a timeout is a non-terminating loop. Each gets a distinct message with the likely cause, because that message is the model's only retry signal.
 - **Resource caps.** `%rt_alloc` and `clifpad_alloc` refuse a single allocation over a configurable limit (default 256 MiB) and a session total over 1 GiB.
+
+### 8.1 Process isolation
+
+Dogfooding the MCP server from Claude Code showed the cost of not having it: one `sdiv` by zero killed the server with `SIGILL`, the host got no response, and every later tool call failed until the user reconnected by hand. All functions and buffers were gone. The CLI has the same failure, and a hang is worse because nothing times out.
+
+**Shape.** A `Supervisor` in the library owns a worker process and exposes the same calls as `Session`: `eval`, `bench`, `declare_global`, `declare_bytes`, `state`, `reset`. The worker is the same binary started as `clifpad --worker [--allow-unsafe]`; it holds an ordinary `Session` and speaks newline-delimited JSON over stdin and stdout, one request, one response. Re-exec rather than `fork`, because forking a process that may have threads is unsafe on macOS and the startup cost is a few milliseconds once per crash. The CLI and the MCP server both switch from `Session` to `Supervisor`. `Session` stays public and in-process for embedders who accept the risk and for `tests/e2e.rs`, so the 2 ms dot-product bar measures the JIT, not the pipe.
+
+```mermaid
+sequenceDiagram
+    participant F as Frontend (CLI / MCP)
+    participant S as Supervisor
+    participant W as Worker (clifpad --worker)
+
+    F->>S: eval(code)
+    S->>W: {"eval": code}
+    W-->>S: {"print": "1"} (streamed)
+    W--xS: SIGSEGV, pipe closes
+    S->>S: decode signal, keep prints so far
+    S->>W: respawn, replay journal
+    S-->>F: Err("crashed: bad address (SIGSEGV) ... printed: 1 ... session restored")
+```
+
+**Contract.** A call that crashes or times out leaves the session as it was before that call, with one exception below. The supervisor keeps a journal of every call that changed state and succeeded: each eval text that defined functions, and each alloc with its arguments. After a crash it starts a new worker and replays the journal in order, compiling definitions without running `%main`. Replay is deterministic because the same texts compiled before. The failed call's own definitions are not journaled, so a call is all or nothing. `reset` clears the journal and replaces the worker, which also returns JIT memory to the OS.
+
+**The exception: buffer contents.** Replay recreates each buffer with its `clifpad_alloc` contents. Values that JIT code stored into a buffer since then, and anything from `%rt_alloc`, die with the worker, and buffer addresses change. The error message says so. Snapshotting buffer bytes after every call would cost a copy of up to 1 GiB per call; buffers in shared memory would survive but need file-backed mappings on macOS. Neither is done until dogfooding shows a model relying on stored state across a crash.
+
+**Timeout.** The supervisor reads responses on a thread and waits with a deadline, default 10 s, set with `--timeout SECS` or `CLIFPAD_TIMEOUT`. On expiry it kills the worker with `SIGKILL`, then respawns and replays as for a crash. The deadline covers a whole call, so `bench` with many iterations of a slow `%main` hits it too, and that message names the iteration count. A watchdog thread in the worker exits the process when its parent dies, so a hung worker never outlives the CLI or MCP server.
+
+**Prints.** `%rt_print_*` currently buffer into `Runtime::prints` and are lost with the process. In the worker, each print is also written to stdout as a `{"print": ...}` line the moment it happens, so the supervisor can report what a program printed before it crashed. That is often the best retry signal a model gets.
+
+**Crash messages.** Decoded from the worker's exit status. Verified on aarch64 macOS by running each case through the current MCP server:
+
+| Program | Signal | Message names |
+|---|---|---|
+| `sdiv` / `srem` by zero, `sdiv` of INT_MIN by -1, `fcvt_to_sint` of NaN, `trap` | `SIGILL` | a Cranelift trap: division by zero, signed division overflow, an unrepresentable float conversion, or an explicit trap |
+| `load` from address 8 or an unmapped high address | `SIGSEGV` (`SIGBUS` also possible) | a bad address: an address used where a loaded value was meant, or an index out of range |
+| unbounded recursion | `SIGABRT`, with Rust's "has overflowed its stack" on stderr | a stack overflow, distinguished from other aborts by the stderr line |
+| deadline passed | killed by the supervisor | a loop that never terminates |
+
+Each message ends with what was printed before the crash and the restore note, so the model can fix the program and call again without knowing anything about processes.
+
+**Cost.** One pipe round trip per call, expected in the tens of microseconds against compile times of 30 to 900 µs. Run and compile times are still measured inside the worker, so reported numbers do not change. To be measured when built, and recorded in §11.
+
+**Not in this step.** Ctrl-C in the REPL still kills the REPL and its worker together, as it does today; interrupting only the worker needs a SIGINT handler in the parent and is a follow-up. The signal-handler alternative in §12.4 stays deferred.
 
 ## 9. Milestones
 
@@ -314,7 +358,7 @@ Each milestone is shippable on its own and has a test that proves it.
 
 **M4 — NL layer in the CLI.** Done in code: `src/nl.rs` and the REPL in `src/main.rs` implement the prompt, six-message history, and the retry loop with a temperature ramp; `:save` / `:load` exist. Verified against stub servers for prompt shape, retries, exhaustion, and network failure. Not yet verified against the real local model from the CLI, because the model server was unreachable when the frontends were merged; `prompts/experiment.py` now drives the real binary and is the way to do that.
 
-**M5 — polish.** Remaining: a hang timeout in the CLI (§8 requires it in every frontend; today only MCP has process isolation, via the host), a signal handler or forked worker so a trap does not kill the REPL. Done already: `dlsym` behind `--allow-unsafe`, resource caps, README rewrite, crate rename to clifpad.
+**M5 — polish.** Remaining: process isolation with a timeout for both frontends, designed in §8.1. Done already: `dlsym` behind `--allow-unsafe`, resource caps, README rewrite, crate rename to clifpad.
 
 ## 10. Crate layout after M1
 
@@ -325,6 +369,7 @@ src/
   runtime.rs    globals, buffers, host ABI (extern "C" fns), CURRENT_RUNTIME
   nl.rs         model client and prompt (CLI only)
   mcp.rs        stdio JSON-RPC server
+  worker.rs     Supervisor and the --worker loop (§8.1)
   main.rs       CLI: REPL, --eval, --mcp
 tests/
   e2e.rs        per-milestone acceptance tests
