@@ -453,9 +453,10 @@ impl Session {
 
     fn compile(&mut self, text: &str, opts: &EvalOptions) -> Result<Compiled> {
         let t0 = Instant::now();
+        let source = text;
         let text = hexify_floats(text);
-        let mut funcs = cranelift_reader::parse_functions(&text)
-            .map_err(|e| anyhow!("parse error: {e}{}", parse_hint(&e.to_string())))?;
+        let mut funcs =
+            cranelift_reader::parse_functions(&text).map_err(|e| parse_error(&e, source))?;
         if funcs.is_empty() {
             bail!("no functions found; expected `function %main() -> i64 {{ ... }}`");
         }
@@ -508,8 +509,9 @@ impl Session {
         }
 
         // Pass 2: resolve imports (functions and global symbols).
+        let mut imports = Vec::with_capacity(funcs.len());
         for f in &mut funcs {
-            self.resolve_imports(f)?;
+            imports.push(self.resolve_imports(f)?);
         }
 
         // Pass 3: verify, compile, and collect IR / disassembly.
@@ -517,7 +519,7 @@ impl Session {
         let mut asm = String::new();
         let mut code_bytes = 0;
         let mut ctx = self.module.make_context();
-        for (f, (name, id)) in funcs.into_iter().zip(order) {
+        for ((f, (name, id)), imports) in funcs.into_iter().zip(order).zip(imports) {
             if let Err(errors) = codegen::verify_function(&f, self.module.isa()) {
                 bail!(
                     "verifier rejected %{name}:\n{}",
@@ -529,12 +531,12 @@ impl Session {
             self.module
                 .define_function(id, &mut ctx)
                 .map_err(|e| anyhow!("compile error in %{name}: {e}"))?;
-            clif.push_str(&ctx.func.display().to_string());
+            clif.push_str(&imports.name_clif(&ctx.func.display().to_string()));
             clif.push('\n');
             if let Some(code) = ctx.compiled_code() {
                 code_bytes += code.code_buffer().len();
                 if opts.asm && let Some(v) = &code.vcode {
-                    asm.push_str(&format!("; %{name}\n{v}\n"));
+                    asm.push_str(&format!("; %{name}\n{}\n", imports.name_asm(v)));
                 }
             }
             self.module.clear_context(&mut ctx);
@@ -557,7 +559,8 @@ impl Session {
         })
     }
 
-    fn resolve_imports(&mut self, f: &mut Function) -> Result<()> {
+    fn resolve_imports(&mut self, f: &mut Function) -> Result<Imports> {
+        let mut imports = Imports::default();
         let refs: Vec<_> = f.dfg.ext_funcs.keys().collect();
         for fref in refs {
             let name = ext_name(&f.dfg.ext_funcs[fref].name);
@@ -590,6 +593,7 @@ impl Session {
                 namespace: 0,
                 index: id.as_u32(),
             });
+            imports.add(r, 0, id.as_u32(), &name);
             f.dfg.ext_funcs[fref].name = ExternalName::user(r);
         }
 
@@ -620,11 +624,12 @@ impl Session {
                 namespace: 1,
                 index: id.as_u32(),
             });
+            imports.add(r, 1, id.as_u32(), &sym);
             if let GlobalValueData::Symbol { name, .. } = &mut f.global_values[gv] {
                 *name = ExternalName::user(r);
             }
         }
-        Ok(())
+        Ok(imports)
     }
 
     fn run_entry(&mut self, ptr: *const u8, sig: &Signature) -> Result<(Scalar, Vec<String>, u64)> {
@@ -679,6 +684,69 @@ fn build_module(symbols: &SymbolTable) -> Result<(JITModule, CallConv)> {
     Ok((JITModule::new(builder), call_conv))
 }
 
+/// Import names of one function, so its optimized CLIF and disassembly can
+/// say `%sq` where Cranelift prints the module ids `u0:4` and `userextname0`.
+#[derive(Default)]
+struct Imports {
+    /// (`u0:4`, `userextname0`, `%sq`)
+    names: Vec<(String, String, String)>,
+}
+
+impl Imports {
+    fn add(&mut self, r: ir::UserExternalNameRef, namespace: u32, index: u32, name: &str) {
+        self.names.push((
+            format!("u{namespace}:{index}"),
+            r.to_string(),
+            format!("%{name}"),
+        ));
+    }
+
+    fn name_clif(&self, clif: &str) -> String {
+        let mut out = clif.to_string();
+        // Function imports print as `u0:4`, global symbols as `userextname2`.
+        for (id, r, name) in &self.names {
+            out = replace_token(&out, id, name);
+            out = replace_token(&out, r, name);
+        }
+        out
+    }
+
+    /// Name call targets and drop the `unwind` pseudo-instructions, which
+    /// describe frame layout for the unwinder and are not machine code.
+    fn name_asm(&self, asm: &str) -> String {
+        let mut out = String::with_capacity(asm.len());
+        for line in asm.lines().filter(|l| !l.trim_start().starts_with("unwind ")) {
+            let mut line = line.to_string();
+            for (_, r, name) in &self.names {
+                let user = format!("User({r})");
+                line = line.replace(&format!("{user}+0"), name).replace(&user, name);
+            }
+            out.push_str(&line);
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// Replace `from` where it is not followed by another digit, so `u0:4` does
+/// not match inside `u0:40`.
+fn replace_token(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(from) {
+        let after = &rest[i + from.len()..];
+        out.push_str(&rest[..i]);
+        if after.starts_with(|c: char| c.is_ascii_digit()) {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
 fn func_name(f: &Function) -> String {
     f.name.to_string().trim_start_matches('%').to_string()
 }
@@ -727,13 +795,38 @@ pub fn display_signature(sig: &Signature) -> String {
 }
 
 /// A retry hint for parse errors models hit repeatedly.
-fn parse_hint(message: &str) -> &'static str {
+fn parse_hint(message: &str, line: &str) -> Option<&'static str> {
+    const CALL_CONVS: [&str; 7] =
+        ["system_v", "fast", "cold", "tail", "apple_aarch64", "windows_fastcall", "winch"];
     if message.contains("Unknown opcode") && message.contains("_imm'") {
-        "; immediate forms do not exist in this Cranelift version, put the constant in a \
-         value with iconst and use the plain instruction"
-    } else {
-        ""
+        return Some(
+            "immediate forms do not exist in this Cranelift version; put the constant in a \
+             value with iconst and use the plain instruction",
+        );
     }
+    let words = line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+    if words.into_iter().any(|w| CALL_CONVS.contains(&w)) {
+        return Some(
+            "do not write a calling convention (system_v, fast, ...) in a function or sig \
+             declaration; the session always uses the platform default",
+        );
+    }
+    None
+}
+
+/// The reader reports only a line number, so echo that line from the
+/// caller's own text (before float rewriting) and add a hint when one fits.
+fn parse_error(e: &cranelift_reader::ParseError, source: &str) -> anyhow::Error {
+    let n = e.location.line_number;
+    let line = n.checked_sub(1).and_then(|i| source.lines().nth(i)).unwrap_or("");
+    let mut msg = format!("parse error: {e}");
+    if !line.trim().is_empty() {
+        msg.push_str(&format!("\n{n:>4} | {}", line.trim_end()));
+    }
+    if let Some(hint) = parse_hint(&e.message, line) {
+        msg.push_str(&format!("\nhint: {hint}"));
+    }
+    anyhow!(msg)
 }
 
 /// cranelift-reader accepts only hexadecimal float literals. Rewrite decimal
@@ -799,6 +892,7 @@ mod tests {
         assert_eq!(hexify_line("    v0 = f64const 1e3"), "    v0 = f64const 0x1.f400000000000p9");
         assert_eq!(hexify_line("block0:"), "block0:");
         assert_eq!(hexify_line("    v0 = f64const 0x1p0"), "    v0 = f64const 0x1.0p0");
+        assert_eq!(replace_token("fn0 = u0:4 sig0; u0:40", "u0:4", "%sq"), "fn0 = %sq sig0; u0:40");
         assert_eq!(
             hexify_line("    v0 = f64const -0x1P-3 ; x"),
             "    v0 = f64const -0x1.0P-3 ; x"

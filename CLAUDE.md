@@ -28,6 +28,6 @@ A native scratchpad: Cranelift IR (CLIF) text is JIT-compiled and run in-process
 
 M1 core, M3 MCP server, M4 natural-language layer, and process isolation (DESIGN.md §8.1) are implemented. M2 was run once against a local Qwen. Both frontends run JIT code through `Supervisor` in a `clifpad --worker` process; `Session` stays in-process for embedders and `tests/e2e.rs`. Remaining, in the order they matter:
 
-1. Keep dogfooding the MCP server from a real Claude Code session (it is registered locally) and fix what an agent stumbles on. Known: optimized CLIF shows callees as `u0:4` instead of `%name`.
+1. Keep dogfooding the MCP server and fix what an agent stumbles on. Run it from an empty directory with `--strict-mcp-config`, because a run from this repo loads this file and already knows the pitfalls. Known gap: `want: ["asm"]` shows only the code compiled in that call, so there is no way to see the asm of a session function that `%main` calls.
 2. Rerun `prompts/experiment.py` through the real CLI, and add a second model.
 3. Ctrl-C in the REPL that interrupts only the worker.

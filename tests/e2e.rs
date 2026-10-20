@@ -352,6 +352,47 @@ block0:
         err.contains("4:"),
         "error should carry the line number of the offending line: {err}"
     );
+    assert!(err.contains("   4 |     v1 = ishl_imm"), "error should echo the line: {err}");
+    assert!(err.contains("hint: immediate forms do not exist"), "{err}");
+}
+
+#[test]
+fn parse_error_hints_at_a_calling_convention() {
+    let mut s = session();
+    let err = eval_err(
+        &mut s,
+        "function %main() -> f64 {\n    sig0 = (f64) -> system_v\nblock0:\n    v0 = f64const 0.0\n    return v0\n}",
+    );
+    assert!(err.contains("   2 |     sig0 = (f64) -> system_v"), "{err}");
+    assert!(err.contains("hint: do not write a calling convention"), "{err}");
+}
+
+#[test]
+fn ir_and_asm_name_imports_and_f64_prints_look_like_floats() {
+    let mut s = session();
+    eval_ok(&mut s, "function %sq(i64) -> i64 {\nblock0(v0: i64):\n    v1 = imul v0, v0\n    return v1\n}");
+    s.declare_global("xs", ElemType::F64, 1).unwrap();
+    let text = "function %main() -> i64 {
+    sig0 = (i64) -> i64
+    fn0 = %sq sig0
+    sig1 = (f64)
+    fn1 = %rt_print_f64 sig1
+    gv0 = symbol %xs
+block0:
+    v0 = symbol_value.i64 gv0
+    v1 = load.f64 v0
+    call fn1(v1)
+    v2 = iconst.i64 3
+    v3 = call fn0(v2)
+    return v3
+}";
+    let o = s.eval(text, &EvalOptions { asm: true }).unwrap();
+    assert_eq!(o.prints, ["0.0"]);
+    assert!(o.clif.contains("fn0 = %sq sig0"), "{}", o.clif);
+    assert!(o.clif.contains("gv0 = symbol %xs"), "{}", o.clif);
+    let asm = o.asm.unwrap();
+    assert!(asm.contains("%sq") && asm.contains("%rt_print_f64") && asm.contains("%xs"), "{asm}");
+    assert!(!asm.contains("userextname") && !asm.contains("unwind "), "{asm}");
 }
 
 #[test]

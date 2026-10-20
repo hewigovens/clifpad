@@ -378,7 +378,9 @@ extern "C" fn rt_print_i64(v: i64) {
 }
 
 extern "C" fn rt_print_f64(v: f64) {
-    Runtime::with(|r| r.print(v.to_string()));
+    // Debug formatting keeps "0.0" distinct from an integer 0 and matches how
+    // a %main f64 result is shown.
+    Runtime::with(|r| r.print(format!("{v:?}")));
 }
 
 extern "C" fn rt_print_str(ptr: i64, len: i64) {

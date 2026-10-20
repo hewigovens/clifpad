@@ -373,16 +373,19 @@ fn crash_cause(status: Option<ExitStatus>, stderr: &str) -> String {
 
 fn timeout_cause(req: &Request, timeout: Duration) -> String {
     let secs = timeout.as_secs_f64();
+    // Do not guess between "never ends" and "too slow": a dogfooding agent
+    // got a loop hint for exponential recursion that had no loop at all.
+    let causes = "Either it never terminates (a loop exit condition that is never met, or a \
+        loop-carried value not passed on the back-edge jump) or it is too slow (for example \
+        exponential recursion); try a smaller input to tell which. The limit is set by the \
+        --timeout flag or CLIFPAD_TIMEOUT.";
     match req {
         Request::Bench { iterations, .. } => format!(
-            "Timed out after {secs} s running %main {iterations} times: lower the iteration count, \
-             or check for a loop that never terminates."
+            "Timed out after {secs} s running %main {iterations} times: lower the iteration \
+             count, or {}",
+            causes.replacen("Either it", "check whether one run", 1)
         ),
-        _ => format!(
-            "Timed out after {secs} s: %main did not return. Most likely a loop that never \
-             terminates: check the exit condition, and that every loop-carried value is passed on \
-             the back-edge jump."
-        ),
+        _ => format!("Timed out after {secs} s: %main did not return. {causes}"),
     }
 }
 

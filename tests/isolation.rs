@@ -121,6 +121,7 @@ fn hang_times_out_and_session_survives() {
         .to_string();
     let took = t0.elapsed();
     assert!(err.contains("Timed out after 0.3 s"), "{err}");
+    assert!(err.contains("never terminates") && err.contains("too slow"), "{err}");
     assert!(err.contains("every function defined before this call is back"), "{err}");
     assert!(took < Duration::from_secs(2), "timeout took {took:?}");
     assert_eq!(eval(&mut s, USE_SQ).unwrap().value, Some(Scalar::I64(81)));
