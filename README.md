@@ -14,7 +14,7 @@ The design, the verified assumptions behind it, and the model experiment are in 
 
 ## Platforms
 
-Developed and tested on macOS on Apple silicon. Linux on x86_64 and aarch64 should work, since Cranelift and the worker only need Unix process APIs, but it is not tested yet. Windows is not supported: the worker that isolates crashes relies on Unix signals.
+CI runs the full test suite on macOS on Apple silicon and Linux on x86_64. Linux on aarch64 should work but is not tested. Windows is not supported: the worker that isolates crashes relies on Unix signals.
 
 ## Build and run
 
