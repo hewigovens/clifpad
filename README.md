@@ -1,6 +1,8 @@
 # clifpad — a native scratchpad
 
 [![CI](https://github.com/hewigovens/clifpad/actions/workflows/ci.yml/badge.svg)](https://github.com/hewigovens/clifpad/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/clifpad.svg)](https://crates.io/crates/clifpad)
+[![docs.rs](https://img.shields.io/docsrs/clifpad)](https://docs.rs/clifpad)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
 [![Cranelift 0.135](https://img.shields.io/badge/cranelift-0.135-informational.svg)](https://cranelift.dev)
@@ -26,10 +28,10 @@ CI runs the full test suite on macOS on Apple silicon and Linux on x86_64. Linux
 Needs Rust 1.95 or newer.
 
 ```bash
-cargo install --git https://github.com/hewigovens/clifpad
+cargo install clifpad
 ```
 
-This puts `clifpad` in `~/.cargo/bin`. To give a coding agent the scratchpad, register the MCP server, for example in Claude Code:
+Or `cargo install --git https://github.com/hewigovens/clifpad` for the latest `main`. Either puts `clifpad` in `~/.cargo/bin`. To give a coding agent the scratchpad, register the MCP server, for example in Claude Code:
 
 ```bash
 claude mcp add clifpad -- clifpad --mcp
