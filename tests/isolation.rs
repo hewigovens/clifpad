@@ -183,3 +183,9 @@ fn reset_replaces_the_worker_and_forgets_the_journal() {
     eval(&mut s, &crash_with("    trap user1")).unwrap_err();
     assert!(s.state().unwrap().globals.is_empty());
 }
+
+#[test]
+fn a_worker_that_never_gets_ready_fails_at_start_not_on_the_first_call() {
+    let err = Supervisor::new("/usr/bin/true", false, Duration::from_secs(5)).err().unwrap().to_string();
+    assert!(err.contains("/usr/bin/true --worker did not start: it exited with exit status: 0"), "{err}");
+}

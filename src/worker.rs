@@ -23,6 +23,11 @@ use crate::session::{
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a new worker may take to say it is ready. Kept apart from the
+/// run timeout: the first exec from a fresh process has been measured at
+/// 400 ms on macOS, which a 0.3 s run limit would blame on the program.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Prints kept for a crash report; the tail is what explains a crash.
 const PRINTS_KEPT: usize = 10;
 
@@ -63,6 +68,7 @@ pub fn serve(allow_unsafe: bool) -> Result<()> {
     exit_with_parent();
     let mut session = Session::new(allow_unsafe)?;
     session.runtime_mut().print_sink = Some(stream_print);
+    send(&Reply::Ok(Value::Null))?;
     for line in std::io::stdin().lock().lines() {
         let line = line?;
         let reply = match serde_json::from_str::<Request>(&line) {
@@ -183,13 +189,30 @@ impl Worker {
             }
         });
 
-        Ok(Self {
+        let mut worker = Self {
             child,
             stdin,
             replies,
             stderr,
             stderr_thread: Some(stderr_thread),
-        })
+        };
+        let why = match worker.replies.recv_timeout(STARTUP_TIMEOUT) {
+            Ok(Some(Reply::Ok(_))) => return Ok(worker),
+            Ok(Some(Reply::Err(e))) => e,
+            Ok(Some(Reply::Print(_))) => "it printed before it was ready".into(),
+            Err(RecvTimeoutError::Timeout) => format!("no ready signal within {} s", STARTUP_TIMEOUT.as_secs()),
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => {
+                let (status, stderr) = worker.reap(false);
+                let code = status.map_or("an unknown status".into(), |s| s.to_string());
+                return Err(anyhow!(
+                    "the worker process {} --worker did not start: it exited with {code}. {}",
+                    exe.display(),
+                    stderr.trim()
+                ));
+            }
+        };
+        worker.reap(true);
+        Err(anyhow!("the worker process {} --worker did not start: {why}", exe.display()))
     }
 
     /// Reap the process and return its status plus the tail of its stderr.
