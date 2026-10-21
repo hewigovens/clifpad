@@ -1,5 +1,10 @@
 # clifpad — a native scratchpad
 
+[![CI](https://github.com/hewigovens/clifpad/actions/workflows/ci.yml/badge.svg)](https://github.com/hewigovens/clifpad/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](https://www.rust-lang.org)
+[![Cranelift 0.135](https://img.shields.io/badge/cranelift-0.135-informational.svg)](https://cranelift.dev)
+
 Small programs written in Cranelift IR (CLIF) are JIT-compiled and run in-process in milliseconds, and every run reports what happened at the machine level: value, optimized IR, disassembly, timing. There is no compile, link, or launch step.
 
 It is meant for the questions a Python snippet cannot answer: bit-exact integer semantics, float edge cases, calling a C symbol already in the process, microbenchmarks, and "what does this compile to". Three frontends share one `Session`:
@@ -15,6 +20,22 @@ The design, the verified assumptions behind it, and the model experiment are in 
 ## Platforms
 
 CI runs the full test suite on macOS on Apple silicon and Linux on x86_64. Linux on aarch64 should work but is not tested. Windows is not supported: the worker that isolates crashes relies on Unix signals.
+
+## Install
+
+Needs Rust 1.95 or newer.
+
+```bash
+cargo install --git https://github.com/hewigovens/clifpad
+```
+
+This puts `clifpad` in `~/.cargo/bin`. To give a coding agent the scratchpad, register the MCP server, for example in Claude Code:
+
+```bash
+claude mcp add clifpad -- clifpad --mcp
+```
+
+Any MCP client that launches stdio servers works the same way: the command is `clifpad --mcp`.
 
 ## Build and run
 
@@ -99,7 +120,7 @@ A `.env` file is loaded if present. Measured against a local Qwen3.8-Flash: 19 o
 `clifpad --mcp` serves one session over stdio with the tools `clifpad_eval`, `clifpad_bench`, `clifpad_alloc`, `clifpad_state`, and `clifpad_reset`. The `clifpad_eval` tool description carries the full CLIF reference, so the agent needs nothing else.
 
 ```bash
-claude mcp add clifpad -- /path/to/target/release/clifpad --mcp
+claude mcp add clifpad -- clifpad --mcp
 ```
 
 Each server process holds its own session. Programs run in a worker process: if one crashes or runs past the timeout, that tool call fails with the cause and whatever the program printed, and the session is restored. Functions and buffers come back; values stored into buffers since they were allocated do not.
