@@ -37,6 +37,62 @@ claude mcp add clifpad -- clifpad --mcp
 
 Any MCP client that launches stdio servers works the same way: the command is `clifpad --mcp`.
 
+## Usage
+
+### With a coding agent
+
+Once the MCP server is registered, ask the agent questions whose answer depends on what the machine actually does. It writes the CLIF, runs it, reads the result, and fixes its own mistakes from the compiler's error messages. For example:
+
+- "What does `sdiv` return for INT64_MIN / -1, and what about `srem`?"
+- "Is `(x * 0x9E3779B97F4A7C15) >> 32` a good hash for small integers? Print the first 16."
+- "Sum 0.1 one million times in f64 and show the exact error."
+- "Benchmark a branchless abs against a branching one over a 1M-element buffer."
+- "Show me the aarch64 code Cranelift emits for a popcount loop."
+
+Each call returns the value, anything the program printed, the optimized IR, optionally the disassembly, and compile and run times. Functions and buffers the agent defines stay in the session, so it can build on them across calls; `clifpad_reset` starts over.
+
+### In the REPL
+
+Run `clifpad` and type CLIF; input runs as soon as the braces balance. Commands start with `:`, and `:help` lists them.
+
+```
+clif> :buf xs i64 1,2,3
+; %xs i64[3] @ 0x100d22560  [1, 2, 3]
+clif> function %main() -> i64 {
+   ..     gv0 = symbol %xs
+   .. block0:
+   ..     v0 = symbol_value.i64 gv0
+   ..     v1 = load.i64 v0+16
+   ..     return v1
+   .. }
+value: 3
+; compile 643 µs · run 2 µs · 24 bytes
+clif> :bench 1000
+; bench 1000 · mean 0.019 µs · min 0.000 µs · median 0.000 µs · max 3.792 µs
+```
+
+`:asm` toggles disassembly, `:clif` shows the optimized IR of the last run, and `:save FILE` / `:load FILE` keep a session's functions between runs. `clifpad --eval FILE` runs a file of the same input non-interactively. With a model configured (see below), a line that is not CLIF is treated as a request in plain language and translated to CLIF first.
+
+### As a Rust library
+
+```rust
+use clifpad::{EvalOptions, Session};
+
+let mut session = Session::new(false)?;
+let out = session.eval(
+    "function %main() -> i64 {
+     block0:
+         v0 = iconst.i64 12
+         v1 = imul v0, v0
+         return v1
+     }",
+    &EvalOptions { asm: true },
+)?;
+println!("{:?} in {} ns", out.value, out.run_ns); // Some(I64(144)) in ... ns
+```
+
+`Session` runs code in the calling process, so a trap in JIT code takes the process down. `Supervisor` implements the same `Backend` trait and runs code in a `clifpad --worker` process instead (so it needs the `clifpad` binary), the way the CLI and MCP server do. A complete program is in [examples/embed.rs](examples/embed.rs) (`cargo run --example embed`).
+
 ## Build and run
 
 ```bash
@@ -47,7 +103,7 @@ cargo test
 cargo run --release
 
 # run a file of REPL input non-interactively
-cargo run --release -- --eval examples.clif
+cargo run --release -- --eval program.clif
 
 # MCP server over stdio
 cargo run --release -- --mcp
@@ -139,6 +195,7 @@ This is not a sandbox. CLIF has raw loads and stores, so a bad address crashes t
 | `src/worker.rs` | `Supervisor`: runs JIT code in a worker process, restores the session after a crash or timeout |
 | `src/nl.rs` | model client and prompt (binary only) |
 | `src/main.rs` | CLI |
+| `examples/embed.rs` | embedding `Session` in a Rust program |
 | `tests/e2e.rs` | acceptance tests per DESIGN.md milestones |
 | `tests/isolation.rs` | crash, hang, replay and timeout through a real worker |
 | `prompts/` | CLIF cheat sheet, task set, experiment harness, results |
